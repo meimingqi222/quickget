@@ -1,5 +1,6 @@
 //! 下载引擎与领域模型。这一层不依赖 GPUI。
 
+pub mod bt;
 pub mod capture;
 pub mod engine;
 pub mod ftp;

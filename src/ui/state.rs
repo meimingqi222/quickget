@@ -1,7 +1,7 @@
 //! UI 状态。
 
 use crate::core::model::Task;
-use crate::core::progress::{Control, LiveProgress};
+use crate::core::progress::{Control, LiveMeta, LiveProgress};
 use gpui::{Bounds, FocusHandle, Pixels, ShapedLine, Task as GpuiTask};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -89,6 +89,7 @@ impl TextInputState {
 pub struct RuntimeSlot {
     pub ctrl: Control,
     pub progress: Arc<LiveProgress>,
+    pub meta: LiveMeta,
     pub task: Option<GpuiTask<()>>,
 }
 
@@ -136,7 +137,9 @@ impl RuntimeMap {
         }
     }
 
-    pub fn sync_into(&self, tasks: &mut [Task]) {
+    /// 把引擎进度、真实文件名和文件清单写回任务。有新标题或新清单时返回 true，该落盘。
+    pub fn sync_into(&self, tasks: &mut [Task]) -> bool {
+        let mut dirty = false;
         for t in tasks {
             if let Some(s) = self.inner.get(&t.id) {
                 t.downloaded = s.progress.downloaded();
@@ -144,7 +147,28 @@ impl RuntimeMap {
                 if total > 0 {
                     t.size = total;
                 }
+                let snap = s.meta.snapshot();
+                if let Some(name) = snap.filename {
+                    if !name.is_empty() && t.filename != name {
+                        t.filename = name;
+                        dirty = true;
+                    }
+                }
+                if !snap.files.is_empty() {
+                    if t.files.is_empty() {
+                        dirty = true;
+                    }
+                    t.files = snap.files;
+                }
+                if let Some(dir) = snap.output_dir {
+                    if t.output_dir.as_ref() != Some(&dir) {
+                        t.output_dir = Some(dir);
+                        dirty = true;
+                    }
+                }
+                t.peers = snap.peers;
             }
         }
+        dirty
     }
 }

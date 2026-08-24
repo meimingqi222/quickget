@@ -1,7 +1,7 @@
 //! 界面文案。中英各一份，渲染时按当前语言取。
 
 use crate::core::i18n::Language;
-use crate::core::model::TaskStatus;
+use crate::core::model::{BtPeers, TaskStatus};
 
 pub fn tr_app(lang: Language) -> &'static str {
     match lang {
@@ -43,8 +43,8 @@ pub fn tr_view_settings(lang: Language) -> &'static str {
 
 pub fn tr_url_placeholder(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "粘贴链接，回车开始下载",
-        Language::En => "Paste a URL, press Return",
+        Language::Zh => "粘贴链接或磁力链接，回车开始下载",
+        Language::En => "Paste a URL or magnet link, press Return",
     }
 }
 
@@ -109,6 +109,81 @@ pub fn tr_btn_browse(lang: Language) -> &'static str {
     }
 }
 
+pub fn tr_detail_url(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "链接",
+        Language::En => "URL",
+    }
+}
+pub fn tr_detail_save(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "保存到",
+        Language::En => "Save to",
+    }
+}
+pub fn tr_detail_files(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("{n} 个文件"),
+        Language::En => {
+            if n == 1 {
+                "1 file".into()
+            } else {
+                format!("{n} files")
+            }
+        }
+    }
+}
+pub fn tr_detail_waiting(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "正在获取文件列表…",
+        Language::En => "Waiting for torrent metadata…",
+    }
+}
+pub fn tr_detail_peers_label(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "节点",
+        Language::En => "Peers",
+    }
+}
+pub fn tr_detail_peers(lang: Language, p: BtPeers) -> String {
+    if p.is_idle() {
+        return match lang {
+            Language::Zh => "还没有节点".into(),
+            Language::En => "no peers yet".into(),
+        };
+    }
+    match lang {
+        Language::Zh => {
+            if p.live == 0 {
+                format!("正在连接 {} · 已知 {}", p.connecting, p.seen)
+            } else if p.live_tcp > 0 && p.live_utp > 0 {
+                format!(
+                    "连接 {}（TCP {} / uTP {}）· 已知 {}",
+                    p.live, p.live_tcp, p.live_utp, p.seen
+                )
+            } else if p.live_utp > 0 {
+                format!("连接 {}（uTP {}）· 已知 {}", p.live, p.live_utp, p.seen)
+            } else {
+                format!("连接 {} · 已知 {}", p.live, p.seen)
+            }
+        }
+        Language::En => {
+            if p.live == 0 {
+                format!("connecting {} · seen {}", p.connecting, p.seen)
+            } else if p.live_tcp > 0 && p.live_utp > 0 {
+                format!(
+                    "{} live (TCP {} / uTP {}) · {} seen",
+                    p.live, p.live_tcp, p.live_utp, p.seen
+                )
+            } else if p.live_utp > 0 {
+                format!("{} live (uTP {}) · {} seen", p.live, p.live_utp, p.seen)
+            } else {
+                format!("{} live · {} seen", p.live, p.seen)
+            }
+        }
+    }
+}
+
 pub fn tr_empty_all(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "暂无任务。粘贴链接开始下载。",
@@ -164,12 +239,7 @@ pub fn tr_status_bad_url(lang: Language) -> String {
         Language::En => "Unrecognized URL.".into(),
     }
 }
-pub fn tr_status_magnet(lang: Language) -> String {
-    match lang {
-        Language::Zh => "暂不支持磁力链接。".into(),
-        Language::En => "Magnet links are not supported yet.".into(),
-    }
-}
+
 pub fn tr_status_done(lang: Language, name: &str) -> String {
     match lang {
         Language::Zh => format!("下载完成：{name}"),
@@ -258,8 +328,8 @@ pub fn tr_settings_lang(lang: Language) -> &'static str {
 }
 pub fn tr_settings_blurb(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "支持 HTTP / HTTPS / FTP / HLS。多连接分段下载，支持断点续传。",
-        Language::En => "HTTP, HTTPS, FTP, HLS. Multi-connection segmented download with resume.",
+        Language::Zh => "支持 HTTP / HTTPS / FTP / HLS / BT。多连接分段下载，支持断点续传。",
+        Language::En => "HTTP, HTTPS, FTP, HLS, BitTorrent. Multi-connection segmented download with resume.",
     }
 }
 pub fn tr_settings_ext(lang: Language) -> &'static str {
@@ -278,5 +348,54 @@ pub fn tr_off(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "关",
         Language::En => "Off",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_line_idle_connecting_and_split() {
+        assert_eq!(
+            tr_detail_peers(Language::Zh, BtPeers::default()),
+            "还没有节点"
+        );
+        assert_eq!(
+            tr_detail_peers(
+                Language::Zh,
+                BtPeers {
+                    connecting: 3,
+                    seen: 15,
+                    ..BtPeers::default()
+                }
+            ),
+            "正在连接 3 · 已知 15"
+        );
+        assert_eq!(
+            tr_detail_peers(
+                Language::Zh,
+                BtPeers {
+                    live: 12,
+                    live_tcp: 10,
+                    live_utp: 2,
+                    seen: 80,
+                    ..BtPeers::default()
+                }
+            ),
+            "连接 12（TCP 10 / uTP 2）· 已知 80"
+        );
+        assert_eq!(
+            tr_detail_peers(
+                Language::En,
+                BtPeers {
+                    live: 8,
+                    live_tcp: 8,
+                    seen: 20,
+                    ..BtPeers::default()
+                }
+            ),
+            "8 live · 20 seen"
+        );
     }
 }

@@ -1,14 +1,21 @@
-//! 下载编排：按协议把任务交给 HTTP / FTP / HLS。
+//! 下载编排：按协议把任务交给 HTTP / FTP / HLS / BT。
 
+use crate::core::bt::{download_bt, BtJob};
 use crate::core::ftp::{download_ftp, FtpJob};
 use crate::core::hls::{default_hls_filename, download_hls, HlsJob};
 use crate::core::http::{download_http, HttpJob};
 use crate::core::model::Task;
-use crate::core::progress::{Control, JobOutcome, LiveProgress};
+use crate::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use crate::core::urlx::Protocol;
 use std::sync::Arc;
 
-pub fn run_task(task: &Task, ua: &str, progress: Arc<LiveProgress>, ctrl: Control) -> JobOutcome {
+pub fn run_task(
+    task: &Task,
+    ua: &str,
+    progress: Arc<LiveProgress>,
+    ctrl: Control,
+    meta: LiveMeta,
+) -> JobOutcome {
     crate::core::log::write(format_args!(
         "开始 {} {} -> {}",
         task.protocol.label(),
@@ -16,9 +23,13 @@ pub fn run_task(task: &Task, ua: &str, progress: Arc<LiveProgress>, ctrl: Contro
         task.dest_path().display()
     ));
     match task.protocol {
-        Protocol::Magnet => JobOutcome::Failed(
-            "暂不支持磁力链接".into(),
-        ),
+        Protocol::Magnet => download_bt(BtJob {
+            url: &task.url,
+            dest: &task.dest_path(),
+            progress,
+            meta,
+            ctrl,
+        }),
         Protocol::Unknown => JobOutcome::Failed("无法识别的协议".into()),
         Protocol::Ftp => download_ftp(FtpJob {
             url: &task.url,
@@ -183,13 +194,16 @@ mod http_live_tests {
             referer: None,
             cookies: None,
             user_agent: None,
+            files: Vec::new(),
+            output_dir: None,
+            peers: Default::default(),
         };
         let progress = LiveProgress::new(0, expected.len() as u64);
         let ctrl = Control {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
         };
-        let outcome = run_task(&task, "quickget-test", progress, ctrl);
+        let outcome = run_task(&task, "quickget-test", progress, ctrl, LiveMeta::new());
         let _ = server.join();
         match outcome {
             JobOutcome::Completed { size, path } => {

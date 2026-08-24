@@ -1,5 +1,6 @@
 pub mod buttons;
 pub mod icons;
+pub mod scroll;
 pub mod sidebar;
 pub mod url_bar;
 

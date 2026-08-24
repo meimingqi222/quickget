@@ -3,7 +3,7 @@ name = "quickget"
 version = "0.1.0"
 edition = "2021"
 default-run = "quickget"
-description = "Lightweight multi-protocol download manager"
+description = "Lightweight multi-protocol download manager (HTTP, FTP, HLS, BitTorrent)"
 license = "MIT"
 
 [dependencies]
@@ -18,6 +18,8 @@ url = "2"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 suppaftp = { version = "6", default-features = false }
+librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
 rfd = "0.15"
 uuid = { version = "1", features = ["v4"] }
 
@@ -41,8 +43,8 @@ name = "QuickGet"
 identifier = "com.quickget.app"
 icon = ["assets/icon.icns", "assets/icon-512.png", "assets/icon.png"]
 category = "Utilities"
-short_description = "Lightweight multi-protocol download manager"
-long_description = "QuickGet is a native, multi-connection download manager for HTTP, HTTPS, FTP and HLS. Fast, small, no Electron."
+short_description = "Lightweight download manager for HTTP, FTP, HLS and BitTorrent"
+long_description = "QuickGet is a native, multi-connection download manager for HTTP, HTTPS, FTP, HLS and BitTorrent. Fast, small, no Electron."
 
 [profile.dev]
 debug = 1

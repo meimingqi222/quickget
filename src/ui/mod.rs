@@ -12,16 +12,19 @@ pub use state::*;
 use crate::core::engine::run_task;
 use crate::core::i18n::{bilingual, Language, Text};
 use crate::core::model::{fmt_speed, Task, TaskStatus};
-use crate::core::progress::{Control, JobOutcome, LiveProgress};
+use crate::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use crate::core::settings::Settings;
 use crate::core::urlx::{
-    detect_protocol, extract_urls, filename_from_url, unique_path, url_identity, Protocol,
+    detect_protocol, extract_urls, filename_from_source, filename_from_url, is_bt_placeholder,
+    unique_path, url_identity, Protocol,
 };
 use crate::ui::components::{render_sidebar, render_url_bar, View};
 use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::views::{render_settings_view, render_tasks_view};
-use gpui::{div, prelude::*, px, rgb, Context, IntoElement, Render, Task as GpuiTask, Window};
+use gpui::{
+    div, prelude::*, px, rgb, Context, IntoElement, Render, ScrollHandle, Task as GpuiTask, Window,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Root {
@@ -42,6 +45,10 @@ pub struct Root {
     pub cursor_blink_visible: bool,
     pub cursor_blink_task: Option<GpuiTask<()>>,
     pub cursor_blink_wanted: bool,
+    pub expanded_task: Option<String>,
+    pub detail_scroll: ScrollHandle,
+    /// 详情文件列表滚动条拖拽：(按下时鼠标 y, 当时的滚动偏移)。
+    pub detail_scroll_drag: Option<(f32, f32)>,
 }
 
 impl Root {
@@ -73,6 +80,9 @@ impl Root {
             cursor_blink_visible: true,
             cursor_blink_task: None,
             cursor_blink_wanted: false,
+            expanded_task: None,
+            detail_scroll: ScrollHandle::new(),
+            detail_scroll_drag: None,
         };
         crate::core::capture::write_pid();
         crate::core::capture::install_native_host();
@@ -143,10 +153,6 @@ impl Root {
         let mut last_already = false;
         for url in urls {
             let proto = detect_protocol(&url);
-            if proto == Protocol::Magnet {
-                self.status = bilingual(|l| tr_status_magnet(l));
-                continue;
-            }
             if proto == Protocol::Unknown {
                 continue;
             }
@@ -157,10 +163,12 @@ impl Root {
             }
             let filename_raw = if proto == Protocol::Hls {
                 crate::core::hls::default_hls_filename(&url)
+            } else if proto == Protocol::Magnet {
+                filename_from_source(&url)
             } else {
                 filename_from_url(&url)
             };
-            let (filename, _) = unique_path(&self.settings.save_dir, &filename_raw);
+            let (filename, dest) = unique_path(&self.settings.save_dir, &filename_raw);
             let now = now_secs();
             let task = Task {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -178,6 +186,13 @@ impl Root {
                 referer: None,
                 cookies: None,
                 user_agent: None,
+                files: Vec::new(),
+                output_dir: if proto == Protocol::Magnet {
+                    Some(dest)
+                } else {
+                    None
+                },
+                peers: Default::default(),
             };
             last_name = filename;
             last_already = false;
@@ -201,11 +216,6 @@ impl Root {
             return;
         }
         let proto = detect_protocol(&url);
-        if proto == Protocol::Magnet {
-            self.status = bilingual(|l| tr_status_magnet(l));
-            cx.notify();
-            return;
-        }
         if proto == Protocol::Unknown {
             self.status = bilingual(|l| tr_status_bad_url(l));
             cx.notify();
@@ -230,11 +240,13 @@ impl Root {
             .unwrap_or_else(|| {
                 if proto == Protocol::Hls {
                     crate::core::hls::default_hls_filename(&url)
+                } else if proto == Protocol::Magnet {
+                    filename_from_source(&url)
                 } else {
                     filename_from_url(&url)
                 }
             });
-        let (filename, _) = unique_path(&self.settings.save_dir, &filename_raw);
+        let (filename, dest) = unique_path(&self.settings.save_dir, &filename_raw);
         let task = Task {
             id: uuid::Uuid::new_v4().to_string(),
             url,
@@ -251,6 +263,13 @@ impl Root {
             referer: job.referer,
             cookies: job.cookies,
             user_agent: job.ua,
+            files: Vec::new(),
+            output_dir: if proto == Protocol::Magnet {
+                Some(dest)
+            } else {
+                None
+            },
+            peers: Default::default(),
         };
         self.tasks.insert(0, task);
         self.status = bilingual(|l| tr_status_added(l, &filename));
@@ -342,11 +361,16 @@ impl Root {
             .unwrap_or_else(|| self.settings.user_agent.clone());
         let ctrl = Control::new();
         let progress = LiveProgress::new(task.downloaded, task.size);
+        let meta = LiveMeta::new();
+        if !task.files.is_empty() {
+            meta.set_files(task.files.clone());
+        }
         let ctrl_bg = ctrl.clone();
         let progress_bg = progress.clone();
+        let meta_bg = meta.clone();
 
         let work = cx.background_executor().spawn(async move {
-            run_task(&task, &ua, progress_bg, ctrl_bg)
+            run_task(&task, &ua, progress_bg, ctrl_bg, meta_bg)
         });
         let id_owned = id.to_string();
         let gpui_task = cx.spawn(async move |this, cx| {
@@ -365,6 +389,7 @@ impl Root {
             RuntimeSlot {
                 ctrl,
                 progress,
+                meta,
                 task: Some(gpui_task),
             },
         );
@@ -372,9 +397,26 @@ impl Root {
     }
 
     fn apply_outcome(&mut self, id: &str, outcome: JobOutcome) {
+        let snap = self
+            .runtime
+            .get(id)
+            .map(|s| s.meta.snapshot())
+            .unwrap_or_default();
         let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
             return;
         };
+        if let Some(name) = snap.filename {
+            if !name.is_empty() {
+                t.filename = name;
+            }
+        }
+        if !snap.files.is_empty() {
+            t.files = snap.files;
+        }
+        if let Some(dir) = snap.output_dir {
+            t.output_dir = Some(dir);
+        }
+        t.peers = snap.peers;
         match outcome {
             JobOutcome::Completed { size, path } => {
                 t.status = TaskStatus::Completed;
@@ -382,9 +424,19 @@ impl Root {
                 t.downloaded = size;
                 t.finished_at = Some(now_secs());
                 t.error = None;
-                if let Some(name) = path.file_name() {
-                    t.filename = name.to_string_lossy().into_owned();
+                if t.protocol == Protocol::Magnet {
+                    t.output_dir = Some(path.clone());
                 }
+                if let Some(name) = path.file_name() {
+                    let n = name.to_string_lossy().into_owned();
+                    if !is_bt_placeholder(&n) || is_bt_placeholder(&t.filename) {
+                        t.filename = n;
+                    }
+                }
+                for f in &mut t.files {
+                    f.downloaded = f.size;
+                }
+                t.peers = Default::default();
                 let name = t.filename.clone();
                 self.status = bilingual(|l| tr_status_done(l, &name));
             }
@@ -400,6 +452,7 @@ impl Root {
             JobOutcome::Cancelled => {
                 t.status = TaskStatus::Cancelled;
                 t.finished_at = Some(now_secs());
+                t.peers = Default::default();
             }
             JobOutcome::Failed(msg) => {
                 t.status = TaskStatus::Failed;
@@ -435,19 +488,23 @@ impl Root {
 
     pub fn remove_task(&mut self, id: &str, cx: &mut Context<Self>) {
         self.runtime.stop(id);
-        let paths = self
-            .tasks
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| t.leftover_paths())
-            .unwrap_or_default();
+        let task = self.tasks.iter().find(|t| t.id == id).cloned();
+        let live_meta = self.runtime.get(id).map(|s| s.meta.clone());
         let wait_for_stop = self.runtime.get(id).is_some();
         self.tasks.retain(|t| t.id != id);
+        if self.expanded_task.as_deref() == Some(id) {
+            self.expanded_task = None;
+        }
         self.status = bilingual(|l| tr_status_trashed(l));
         self.persist();
         cx.notify();
         if !wait_for_stop {
-            crate::core::io::trash_paths(&paths);
+            if let Some(task) = task {
+                crate::core::io::trash_paths(&leftover_paths_for_remove(
+                    task,
+                    live_meta.as_ref(),
+                ));
+            }
             self.runtime.remove(id);
             return;
         }
@@ -464,6 +521,9 @@ impl Root {
                     break;
                 }
             }
+            let paths = task
+                .map(|t| leftover_paths_for_remove(t, live_meta.as_ref()))
+                .unwrap_or_default();
             cx.background_executor()
                 .spawn(async move {
                     crate::core::io::trash_paths(&paths);
@@ -514,7 +574,9 @@ impl Root {
                 .update(cx, |this, cx| {
                     this.anim_phase = this.anim_phase.wrapping_add(1);
                     this.runtime.tick_all(200);
-                    this.runtime.sync_into(&mut this.tasks);
+                    if this.runtime.sync_into(&mut this.tasks) {
+                        this.persist();
+                    }
                     let n = this
                         .tasks
                         .iter()
@@ -577,6 +639,50 @@ impl Root {
             self.add_urls(&url, cx);
         }
     }
+
+    pub fn toggle_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.expanded_task.as_deref() == Some(id) {
+            self.expanded_task = None;
+            self.detail_scroll_drag = None;
+        } else {
+            self.expanded_task = Some(id.to_string());
+            self.detail_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            self.detail_scroll_drag = None;
+        }
+        cx.notify();
+    }
+
+    pub fn reveal_task_file(&mut self, id: &str, file_path: &str, _cx: &mut Context<Self>) {
+        let Some(t) = self.tasks.iter().find(|t| t.id == id) else {
+            return;
+        };
+        if let Some(file) = t.files.iter().find(|f| f.path == file_path) {
+            let p = t.file_disk_path(file);
+            if p.exists() {
+                crate::platform::reveal_in_explorer(&p);
+                return;
+            }
+        }
+        crate::platform::reveal_in_explorer(&t.dest_path());
+    }
+}
+
+fn leftover_paths_for_remove(mut task: Task, meta: Option<&LiveMeta>) -> Vec<std::path::PathBuf> {
+    if let Some(meta) = meta {
+        let snap = meta.snapshot();
+        if let Some(name) = snap.filename {
+            if !name.is_empty() {
+                task.filename = name;
+            }
+        }
+        if !snap.files.is_empty() {
+            task.files = snap.files;
+        }
+        if let Some(dir) = snap.output_dir {
+            task.output_dir = Some(dir);
+        }
+    }
+    task.leftover_paths()
 }
 
 fn now_secs() -> i64 {

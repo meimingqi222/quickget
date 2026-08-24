@@ -77,8 +77,22 @@ pub fn remove_paths(paths: &[std::path::PathBuf]) {
 }
 
 /// 尽量送进系统废纸篓；失败再永久删除。
+/// 先处理文件再处理目录，避免目录因里面还有文件而删不掉。
 pub fn trash_paths(paths: &[std::path::PathBuf]) {
+    let mut dirs = Vec::new();
     for p in paths {
+        if !p.exists() {
+            continue;
+        }
+        if p.is_dir() {
+            dirs.push(p);
+            continue;
+        }
+        if crate::platform::move_to_trash(p).is_err() {
+            remove_path(p);
+        }
+    }
+    for p in dirs {
         if !p.exists() {
             continue;
         }

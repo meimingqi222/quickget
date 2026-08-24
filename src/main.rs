@@ -5,7 +5,7 @@
 use gpui::{actions, px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 use quickget::core::engine::run_task;
 use quickget::core::model::{Task, TaskStatus};
-use quickget::core::progress::{Control, JobOutcome, LiveProgress};
+use quickget::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use quickget::core::settings::{default_download_dir, default_ua};
 use quickget::core::urlx::{detect_protocol, filename_from_url, unique_path, Protocol};
 use quickget::ui::Root;
@@ -119,13 +119,15 @@ fn cli_main(args: &[String]) {
     let mut failed = 0;
     for url in urls {
         let proto = detect_protocol(&url);
-        if proto == Protocol::Magnet {
-            eprintln!("暂不支持磁力链接。");
+        if proto == Protocol::Unknown {
+            eprintln!("无法识别的协议：{url}");
             failed += 1;
             continue;
         }
         let name = if proto == Protocol::Hls {
             quickget::core::hls::default_hls_filename(&url)
+        } else if proto == Protocol::Magnet {
+            quickget::core::urlx::filename_from_source(&url)
         } else {
             filename_from_url(&url)
         };
@@ -147,13 +149,20 @@ fn cli_main(args: &[String]) {
             referer: None,
             cookies: None,
             user_agent: None,
+            files: Vec::new(),
+            output_dir: if proto == Protocol::Magnet {
+                Some(dest.clone())
+            } else {
+                None
+            },
+            peers: Default::default(),
         };
         let progress = LiveProgress::new(0, 0);
         let ctrl = Control {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
         };
-        match run_task(&task, ua, progress.clone(), ctrl) {
+        match run_task(&task, ua, progress.clone(), ctrl, LiveMeta::new()) {
             JobOutcome::Completed { size, path } => {
                 eprintln!("  完成 {} ({})", path.display(), quickget::core::model::fmt_size(size));
                 let _ = dest;

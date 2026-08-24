@@ -1,7 +1,9 @@
 //! 跨线程进度。UI 只读原子量，引擎只写。
 
+use crate::core::model::{BtPeers, TaskFile};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct Control {
@@ -58,6 +60,10 @@ impl LiveProgress {
         self.downloaded.fetch_add(n, Ordering::Relaxed);
     }
 
+    pub fn set_downloaded(&self, n: u64) {
+        self.downloaded.store(n, Ordering::Relaxed);
+    }
+
     pub fn set_total(&self, n: u64) {
         self.total.store(n, Ordering::Relaxed);
     }
@@ -93,6 +99,77 @@ impl LiveProgress {
         };
         self.speed_bps.store(smoothed, Ordering::Relaxed);
         smoothed
+    }
+}
+
+/// 引擎往 UI 回传文件名和文件清单。BT 元数据到了就会写这里。
+#[derive(Clone, Default)]
+pub struct LiveMeta {
+    inner: Arc<Mutex<LiveMetaInner>>,
+}
+
+#[derive(Default)]
+struct LiveMetaInner {
+    filename: Option<String>,
+    files: Vec<TaskFile>,
+    output_dir: Option<PathBuf>,
+    peers: BtPeers,
+}
+
+#[derive(Clone, Default)]
+pub struct LiveMetaSnapshot {
+    pub filename: Option<String>,
+    pub files: Vec<TaskFile>,
+    pub output_dir: Option<PathBuf>,
+    pub peers: BtPeers,
+}
+
+impl LiveMeta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_filename(&self, name: String) {
+        if name.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.inner.lock() {
+            g.filename = Some(name);
+        }
+    }
+
+    pub fn set_files(&self, files: Vec<TaskFile>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.files = files;
+        }
+    }
+
+    pub fn set_output_dir(&self, dir: PathBuf) {
+        if dir.as_os_str().is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.inner.lock() {
+            g.output_dir = Some(dir);
+        }
+    }
+
+    pub fn set_peers(&self, peers: BtPeers) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.peers = peers;
+        }
+    }
+
+    pub fn snapshot(&self) -> LiveMetaSnapshot {
+        let copy = |g: &LiveMetaInner| LiveMetaSnapshot {
+            filename: g.filename.clone(),
+            files: g.files.clone(),
+            output_dir: g.output_dir.clone(),
+            peers: g.peers,
+        };
+        match self.inner.lock() {
+            Ok(g) => copy(&g),
+            Err(p) => copy(&p.into_inner()),
+        }
     }
 }
 

@@ -18,7 +18,7 @@ impl Protocol {
             Protocol::Http => "HTTP",
             Protocol::Ftp => "FTP",
             Protocol::Hls => "HLS",
-            Protocol::Magnet => "Magnet",
+            Protocol::Magnet => "BT",
             Protocol::Unknown => "?",
         }
     }
@@ -56,6 +56,12 @@ pub fn normalize_url(raw: &str) -> Option<String> {
     if lower.starts_with("magnet:") {
         return Some(s.to_string());
     }
+    if lower.starts_with("file://") {
+        return Some(s.to_string());
+    }
+    if looks_like_torrent_path(s) {
+        return Some(s.to_string());
+    }
     if lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("ftp://")
@@ -68,6 +74,18 @@ pub fn normalize_url(raw: &str) -> Option<String> {
         return Some(format!("https://{s}"));
     }
     None
+}
+
+fn looks_like_torrent_path(s: &str) -> bool {
+    let path = s.split(['?', '#']).next().unwrap_or(s);
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    if !lower.ends_with(".torrent") {
+        return false;
+    }
+    path.contains('/')
+        || path.contains('\\')
+        || (cfg!(windows) && path.len() >= 3 && path.as_bytes()[1] == b':')
+        || std::path::Path::new(s).is_file()
 }
 
 fn looks_like_host_path(s: &str) -> bool {
@@ -89,10 +107,26 @@ pub fn detect_protocol(url: &str) -> Protocol {
     if lower.contains(".m3u8") || lower.contains("m3u8?") || lower.contains("/m3u8") {
         return Protocol::Hls;
     }
+    if looks_like_torrent(url) {
+        return Protocol::Magnet;
+    }
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Protocol::Http;
     }
     Protocol::Unknown
+}
+
+pub fn looks_like_torrent(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("magnet:") {
+        return false;
+    }
+    if lower.starts_with("file://") {
+        return looks_like_torrent_path(&lower);
+    }
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    let path = path.replace('\\', "/");
+    path.ends_with(".torrent")
 }
 
 /// 从 URL 路径抽出文件名，百分号解码，清洗非法字符。
@@ -102,7 +136,11 @@ pub fn filename_from_url(url: &str) -> String {
         .as_ref()
         .map(|u| u.path().to_string())
         .unwrap_or_else(|| url.to_string());
-    let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("download");
+    let normalized = path.replace('\\', "/");
+    let last = normalized
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("download");
     let decoded = percent_decode_str(last).decode_utf8_lossy();
     let clean = sanitize_filename(&decoded);
     if clean.is_empty() || clean == "download" {
@@ -110,6 +148,83 @@ pub fn filename_from_url(url: &str) -> String {
     } else {
         clean
     }
+}
+
+/// 磁力链接还没拿到元数据时的标题：有 `dn` 就用，否则先叫 BT，等种子信息到了再换真名。
+pub fn filename_from_magnet(url: &str) -> String {
+    if let Some(dn) = magnet_display_name(url) {
+        return dn;
+    }
+    "BT".into()
+}
+
+/// 占位标题：还没换成种子真名。
+pub fn is_bt_placeholder(name: &str) -> bool {
+    let t = name.trim();
+    if t.eq_ignore_ascii_case("bt") || t.eq_ignore_ascii_case("torrent") {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("magnet-") {
+        return !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ' ');
+    }
+    false
+}
+
+fn magnet_display_name(url: &str) -> Option<String> {
+    if let Ok(u) = url::Url::parse(url) {
+        for (k, v) in u.query_pairs() {
+            if k.eq_ignore_ascii_case("dn") {
+                let s = sanitize_filename(v.as_ref());
+                if !s.is_empty() && !is_bt_placeholder(&s) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    if let Some(dn) = magnet_query(url, "dn") {
+        let plus = dn.replace('+', " ");
+        let decoded = percent_decode_str(&plus).decode_utf8_lossy();
+        let s = sanitize_filename(&decoded);
+        if !s.is_empty() && !is_bt_placeholder(&s) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// 按协议挑一个还没拿到远端元数据时能用的文件名。
+pub fn filename_from_source(url: &str) -> String {
+    if url.to_ascii_lowercase().starts_with("magnet:") {
+        return filename_from_magnet(url);
+    }
+    if looks_like_torrent(url) {
+        let name = filename_from_url(url);
+        let stripped = name
+            .strip_suffix(".torrent")
+            .or_else(|| name.strip_suffix(".TORRENT"))
+            .unwrap_or(&name);
+        let s = sanitize_filename(stripped);
+        if s.is_empty() {
+            return "torrent".into();
+        }
+        return s;
+    }
+    filename_from_url(url)
+}
+
+fn magnet_query(url: &str, key: &str) -> Option<String> {
+    let q = url.split_once('?')?.1;
+    for part in q.split('&') {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        if k.eq_ignore_ascii_case(key) && !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 /// Content-Disposition: attachment; filename="x"; filename*=UTF-8''x
@@ -165,7 +280,14 @@ pub fn sanitize_filename(name: &str) -> String {
 
 /// 去掉 query / fragment，用来判断是不是同一个资源。
 /// 地理空间数据云的 sid 每次都会变，比完整 URL 才能去重。
+/// 磁力链接用 infohash（`xt`）去重。
 pub fn url_identity(url: &str) -> String {
+    if url.to_ascii_lowercase().starts_with("magnet:") {
+        if let Some(xt) = magnet_query(url, "xt") {
+            return format!("magnet:{}", xt.to_ascii_lowercase());
+        }
+        return url.to_ascii_lowercase();
+    }
     match url::Url::parse(url) {
         Ok(u) => format!(
             "{}://{}{}",
@@ -207,10 +329,32 @@ fn part_exists(dir: &std::path::Path, filename: &str) -> bool {
 fn split_name(filename: &str) -> (String, String) {
     match filename.rfind('.') {
         Some(i) if i > 0 && i < filename.len() - 1 => {
-            (filename[..i].to_string(), filename[i + 1..].to_string())
+            let ext = &filename[i + 1..];
+            if is_file_extension(ext) {
+                (filename[..i].to_string(), ext.to_string())
+            } else {
+                (filename.to_string(), String::new())
+            }
         }
         _ => (filename.to_string(), String::new()),
     }
+}
+
+/// 纯数字后缀当成版本号（`Ubuntu 24.04`），不当成扩展名。
+fn is_file_extension(ext: &str) -> bool {
+    let n = ext.chars().count();
+    if n == 0 || n > 8 {
+        return false;
+    }
+    let mut has_letter = false;
+    for c in ext.chars() {
+        if c.is_ascii_alphabetic() {
+            has_letter = true;
+        } else if !c.is_ascii_digit() {
+            return false;
+        }
+    }
+    has_letter
 }
 
 #[cfg(test)]
@@ -249,6 +393,45 @@ mod tests {
             detect_protocol("magnet:?xt=urn:btih:abc"),
             Protocol::Magnet
         );
+        assert_eq!(
+            detect_protocol("https://ex.com/a.torrent"),
+            Protocol::Magnet
+        );
+        assert_eq!(
+            detect_protocol("https://ex.com/a.torrent?token=1"),
+            Protocol::Magnet
+        );
+        assert_eq!(
+            detect_protocol(r"C:\Downloads\ubuntu.torrent"),
+            Protocol::Magnet
+        );
+    }
+
+    #[test]
+    fn filename_from_magnet_uses_dn() {
+        assert_eq!(
+            filename_from_magnet("magnet:?xt=urn:btih:abcdef0123456789&dn=Ubuntu%2024.04"),
+            "Ubuntu 24.04"
+        );
+        assert_eq!(
+            filename_from_magnet("magnet:?xt=urn:btih:abcdef0123456789&dn=Foo+Bar"),
+            "Foo Bar"
+        );
+        assert_eq!(
+            filename_from_magnet("magnet:?xt=urn:btih:abcdef0123456789"),
+            "BT"
+        );
+        assert!(is_bt_placeholder("BT"));
+        assert!(is_bt_placeholder("magnet-abcdef01"));
+        assert!(!is_bt_placeholder("Ubuntu 24.04"));
+    }
+
+    #[test]
+    fn magnet_identity_is_infohash() {
+        let a = "magnet:?xt=urn:btih:ABCDEF&dn=one&tr=http://t";
+        let b = "magnet:?xt=urn:btih:abcdef&dn=two";
+        assert_eq!(url_identity(a), url_identity(b));
+        assert_eq!(url_identity(a), "magnet:urn:btih:abcdef");
     }
 
     #[test]
@@ -270,10 +453,26 @@ mod tests {
     }
 
     #[test]
+    fn unique_path_keeps_version_dot_in_folder_name() {
+        let dir = std::env::temp_dir().join(format!("qg-uniq-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("Ubuntu 24.04")).unwrap();
+        let (name, _) = unique_path(&dir, "Ubuntu 24.04");
+        assert_eq!(name, "Ubuntu 24.04 (1)");
+        let (zip, _) = unique_path(&dir, "a.zip");
+        assert_eq!(zip, "a.zip");
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        let (zip2, _) = unique_path(&dir, "a.zip");
+        assert_eq!(zip2, "a (1).zip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn extract_multiple_lines() {
-        let raw = "https://a.com/1\nftp://b.com/2\nnot a url\n";
+        let raw = "https://a.com/1\nftp://b.com/2\nmagnet:?xt=urn:btih:abc\nnot a url\n";
         let v = extract_urls(raw);
-        assert_eq!(v.len(), 2);
+        assert_eq!(v.len(), 3);
+        assert!(v[2].starts_with("magnet:"));
     }
 
     #[test]

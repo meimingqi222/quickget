@@ -34,10 +34,22 @@ impl std::fmt::Display for ProbeError {
 pub fn probe(url: &str, ua: &str) -> Result<Probe, ProbeError> {
     let protocol = crate::core::urlx::detect_protocol(url);
     match protocol {
-        Protocol::Magnet => Err(ProbeError::Magnet),
+        Protocol::Magnet => Ok(probe_magnet(url)),
         Protocol::Unknown => Err(ProbeError::Unknown),
         Protocol::Ftp => crate::core::ftp::probe_ftp(url).map_err(ProbeError::Network),
         Protocol::Http | Protocol::Hls => probe_http(url, ua, protocol),
+    }
+}
+
+fn probe_magnet(url: &str) -> Probe {
+    Probe {
+        url: url.to_string(),
+        protocol: Protocol::Magnet,
+        size: 0,
+        ranges: true,
+        filename: crate::core::urlx::filename_from_source(url),
+        content_type: "application/x-bittorrent".into(),
+        etag: None,
     }
 }
 

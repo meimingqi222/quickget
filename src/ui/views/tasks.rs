@@ -1,11 +1,18 @@
-use crate::core::model::{fmt_eta, fmt_size, fmt_speed, Task, TaskStatus};
+use crate::core::model::{fmt_eta, fmt_size, fmt_speed, truncate, Task, TaskStatus};
 use crate::core::urlx::Protocol;
 use crate::ui::components::buttons::small_button;
+use crate::ui::components::scroll::{
+    drag_capture, drag_to_offset, scroll_metrics, scrollbar, SCROLLBAR_W,
+};
 use crate::ui::components::sidebar::View;
 use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::Root;
 use gpui::{div, prelude::*, px, rgb, relative, Context, IntoElement, SharedString};
+
+/// 展开详情里文件列表的最大高度。超出这条才出滚动条。
+const DETAIL_LIST_MAX_H: f32 = 240.0;
+const FILE_ROW_H: f32 = 26.0;
 
 pub fn render_tasks_view(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
     let lang = root.language;
@@ -127,7 +134,9 @@ fn render_task_row(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl IntoEl
         eta
     );
 
+    let expanded = root.expanded_task.as_deref() == Some(t.id.as_str());
     let id = t.id.clone();
+    let id_toggle = t.id.clone();
     let id_pause = t.id.clone();
     let id_retry = t.id.clone();
     let id_remove = t.id.clone();
@@ -180,7 +189,11 @@ fn render_task_row(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl IntoEl
         .rounded_xl()
         .bg(rgb(CARD))
         .border_1()
-        .border_color(rgba(OUTLINE_VAR, 0.55))
+        .border_color(if expanded {
+            rgba(PRIMARY, 0.45)
+        } else {
+            rgba(OUTLINE_VAR, 0.55)
+        })
         .flex()
         .flex_col()
         .gap_2()
@@ -192,11 +205,14 @@ fn render_task_row(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl IntoEl
                 .gap_3()
                 .child(
                     div()
+                        .id(SharedString::from(format!("task-toggle-{id_toggle}")))
                         .flex_1()
                         .min_w(px(0.))
                         .flex()
                         .flex_col()
                         .gap(px(2.))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_task(&id_toggle, cx)))
                         .child(
                             div()
                                 .text_sm()
@@ -248,5 +264,188 @@ fn render_task_row(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl IntoEl
                         .child(t.error.clone().unwrap_or_default()),
                 )
             },
+        )
+        .when(expanded, |d| d.child(render_task_detail(root, t, cx)))
+}
+
+fn render_task_detail(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl IntoElement {
+    let lang = root.language;
+    let waiting_bt = t.protocol == Protocol::Magnet
+        && t.files.is_empty()
+        && t.status.is_open();
+    let files = if waiting_bt {
+        Vec::new()
+    } else {
+        t.display_files()
+    };
+    let total_files = files.len();
+
+    let mut body = div()
+        .w_full()
+        .mt_1()
+        .pt_2()
+        .border_t_1()
+        .border_color(rgba(OUTLINE_VAR, 0.5))
+        .flex()
+        .flex_col()
+        .gap_1();
+
+    body = body
+        .child(detail_row(tr_detail_url(lang), truncate(&t.url, 72)))
+        .child(detail_row(
+            tr_detail_save(lang),
+            t.dest_path().display().to_string(),
+        ));
+
+    if t.protocol == Protocol::Magnet
+        && (t.status.is_active() || t.status == TaskStatus::Paused || !t.peers.is_idle())
+    {
+        body = body.child(detail_row(
+            tr_detail_peers_label(lang),
+            tr_detail_peers(lang, t.peers),
+        ));
+    }
+
+    if waiting_bt {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .pt_1()
+                .child(tr_detail_waiting(lang).to_string()),
+        );
+        return body;
+    }
+
+    body = body.child(
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(MUTED))
+            .pt_1()
+            .child(tr_detail_files(lang, total_files)),
+    );
+
+    let handle = root.detail_scroll.clone();
+    let est_content = total_files as f32 * FILE_ROW_H;
+    let metrics = scroll_metrics(&handle, DETAIL_LIST_MAX_H, est_content);
+
+    let mut list = div()
+        .id(SharedString::from(format!("task-files-{}", t.id)))
+        .w_full()
+        .max_h(px(DETAIL_LIST_MAX_H))
+        .overflow_y_scroll()
+        .track_scroll(&handle)
+        .flex()
+        .flex_col()
+        .when(metrics.is_some(), |d| d.pr(px(SCROLLBAR_W)));
+
+    for (i, f) in files.into_iter().enumerate() {
+        let task_id = t.id.clone();
+        let file_path = f.path.clone();
+        let size_txt = if f.size > 0 && f.downloaded > 0 && f.downloaded < f.size {
+            format!("{} / {}", fmt_size(f.downloaded), fmt_size(f.size))
+        } else if f.size > 0 {
+            fmt_size(f.size)
+        } else {
+            String::new()
+        };
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("file-{}-{i}", t.id)))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py(px(3.))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|h| h.bg(rgb(SURF_LOW)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.reveal_task_file(&task_id, &file_path, cx);
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(rgb(TEXT))
+                        .overflow_hidden()
+                        .child(f.path),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(size_txt),
+                ),
+        );
+    }
+
+    let scrollbar_el = metrics.map(|m| {
+        scrollbar(
+            SharedString::from(format!("task-files-thumb-{}", t.id)),
+            m,
+            |thumb| {
+                thumb.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        let mouse_y: f32 = event.position.y.into();
+                        let start_top: f32 = (-this.detail_scroll.offset().y).into();
+                        this.detail_scroll_drag = Some((mouse_y, start_top.max(0.0)));
+                        cx.notify();
+                    }),
+                )
+            },
+        )
+    });
+
+    body.child(
+        div()
+            .relative()
+            .w_full()
+            .max_h(px(DETAIL_LIST_MAX_H))
+            .child(list)
+            .children(scrollbar_el)
+            .child(drag_capture(
+                cx.entity(),
+                |this, mouse_y, cx| {
+                    let Some(start) = this.detail_scroll_drag else {
+                        return;
+                    };
+                    if let Some(new_top) = drag_to_offset(&this.detail_scroll, start, mouse_y) {
+                        this.detail_scroll
+                            .set_offset(gpui::point(px(0.0), px(-new_top)));
+                        cx.notify();
+                    }
+                },
+                |this, cx| {
+                    if this.detail_scroll_drag.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            )),
+    )
+}
+
+fn detail_row(label: &str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .gap_2()
+        .child(
+            div()
+                .w(px(52.))
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_xs()
+                .text_color(rgb(TEXT))
+                .child(value),
         )
 }
