@@ -72,6 +72,7 @@ $RECYCLE.BIN/
 *.mobileprovision
 
 # 调试与核心转储
-core
-core.*
+# 仅匹配仓库根目录下的 core 转储文件，避免误排除 src/core/ 源码目录
+/core
+/core.*
 *.core
