@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      width: 280px;
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #1a1c1c;
+      background: #f9f9f9;
+    }
+    main { padding: 14px 14px 12px; }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      font-weight: 650;
+    }
+    p { margin: 0 0 12px; color: #404752; }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .primary { background: #005faa; color: #fff; }
+    .primary:hover { background: #0078d4; }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: #404752;
+      cursor: pointer;
+    }
+    #status {
+      margin-top: 10px;
+      min-height: 16px;
+      color: #404752;
+      font-size: 12px;
+    }
+    #status.err { color: #ba1a1a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>QuickGet</h1>
+    <p>把当前页或右键链接发给本机下载器，带上登录 Cookie。</p>
+    <button class="primary" id="send">下载当前页</button>
+    <label>
+      <input type="checkbox" id="intercept" />
+      接管浏览器下载（默认关）
+    </label>
+    <div id="status"></div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

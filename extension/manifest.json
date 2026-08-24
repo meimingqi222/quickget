@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "QuickGet",
+  "version": "0.1.0",
+  "description": "Send links to QuickGet with cookies. Chromium browsers only.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqFZkwIU+nTPQK5j3zbb3OvR2zhp2SMWvBUuLXyQSOoCSsqQQPRH+hxsk8SxH7VfCfiwBlF57B0DTbz9k8vJUdyjIRx0hcnj9T8q0pdOlqA13BwqaQQcEJhMBOFsJQIba6i1AVnzE7Wa1wKw/k7NmRQrYr5xMdDbracuz7sO1iPQn2r1e3/XBpzGwhznw7LAGLzFfYgnHicVWFNYS8hSednYj3PzT6qH+K0x8cXrGpvEpRlzjIzSDI9Gamf4RCMafl2Ie8pUafe0ps5Fyxw9C1xVnYhtbLM8LFbcU0DnAFinB7jhSb9t4wr3Xely+yQql8SeR4QQo48plFcjM9TYQ2QIDAQAB",
+  "action": {
+    "default_title": "QuickGet",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging",
+    "cookies",
+    "activeTab",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": ["<all_urls>"]
+}

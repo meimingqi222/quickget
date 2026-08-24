@@ -1,0 +1,77 @@
+# 构建产物
+/target
+/dist
+/build
+/out
+
+# Rust 调试产物
+*.pdb
+*.ilk
+*.rs.bk
+*.dSYM
+*.sym
+
+# 测试与覆盖率分析产物
+*.profraw
+*.profdata
+coverage/
+htmlcov/
+*.gcda
+*.gcno
+
+# 本地临时数据
+*.tmp
+*.bak
+*.log
+*.part
+*.qg.json
+*.sqlite
+*.sqlite3
+*.db
+
+# 环境变量与本地配置
+.env
+.env.local
+.env.*.local
+*.secret
+secrets.toml
+config.local.toml
+
+# 操作系统自动生成文件
+Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+*.stackdump
+
+# 编辑器
+.idea/
+.vscode/
+.commandcode/
+*.swp
+*.swo
+*~
+*.sublime-*
+.vim/
+.nvim/
+
+# macOS 应用打包产物
+*.app/
+*.dmg
+*.pkg
+
+# 签名与证书
+*.p12
+*.pfx
+*.cer
+*.mobileprovision
+
+# 调试与核心转储
+core
+core.*
+*.core

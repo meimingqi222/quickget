@@ -1,0 +1,56 @@
+[package]
+name = "quickget"
+version = "0.1.0"
+edition = "2021"
+default-run = "quickget"
+description = "Lightweight multi-protocol download manager"
+license = "MIT"
+
+[dependencies]
+# `default-features = false` 关掉 Linux 的 wayland/x11 和 Windows 的 manifest，
+# 但必须保留 `font-kit`——否则 macOS 上会用 NoopTextSystem，文字全部不可见。
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+url = "2"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
+suppaftp = { version = "6", default-features = false }
+rfd = "0.15"
+uuid = { version = "1", features = ["v4"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["wincon", "winnls", "winuser", "shellapi", "processthreadsapi", "handleapi", "winnt", "winreg"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
+
+[package.metadata.bundle]
+name = "QuickGet"
+identifier = "com.quickget.app"
+icon = ["assets/icon.icns", "assets/icon-512.png", "assets/icon.png"]
+category = "Utilities"
+short_description = "Lightweight multi-protocol download manager"
+long_description = "QuickGet is a native, multi-connection download manager for HTTP, HTTPS, FTP and HLS. Fast, small, no Electron."
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
