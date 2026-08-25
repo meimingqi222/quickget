@@ -21,7 +21,6 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if quickget::core::native_host::is_native_host_invocation(&args) {
-        quickget::core::log::init();
         quickget::core::native_host::run();
         return;
     }
@@ -34,6 +33,17 @@ fn main() {
         cli_main(&args);
         return;
     }
+
+    if quickget::core::capture::gui_alive() {
+        quickget::core::capture::request_raise();
+        return;
+    }
+    let Some(_gui_lock) = quickget::core::capture::try_acquire_gui_lock() else {
+        quickget::core::capture::request_raise();
+        return;
+    };
+    // 抢到锁立刻写 pid，后面的 native host 就不会再各拉起一个 GUI。
+    quickget::core::capture::write_pid();
 
     quickget::core::log::init();
     quickget::core::log::install_panic_hook();
@@ -164,7 +174,11 @@ fn cli_main(args: &[String]) {
         };
         match run_task(&task, ua, progress.clone(), ctrl, LiveMeta::new()) {
             JobOutcome::Completed { size, path } => {
-                eprintln!("  完成 {} ({})", path.display(), quickget::core::model::fmt_size(size));
+                eprintln!(
+                    "  完成 {} ({})",
+                    path.display(),
+                    quickget::core::model::fmt_size(size)
+                );
                 let _ = dest;
             }
             JobOutcome::Failed(e) => {

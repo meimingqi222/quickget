@@ -166,10 +166,7 @@ pub fn is_bt_placeholder(name: &str) -> bool {
     }
     let lower = t.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("magnet-") {
-        return !rest.is_empty()
-            && rest
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == ' ');
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit() || c == ' ');
     }
     false
 }
@@ -232,7 +229,9 @@ pub fn filename_from_disposition(header: &str) -> Option<String> {
     // filename* 优先（RFC 5987）
     if let Some(star) = find_param(header, "filename*") {
         let v = star.trim_matches('"');
-        let decoded = if let Some(rest) = v.strip_prefix("UTF-8''").or_else(|| v.strip_prefix("utf-8''"))
+        let decoded = if let Some(rest) = v
+            .strip_prefix("UTF-8''")
+            .or_else(|| v.strip_prefix("utf-8''"))
         {
             percent_decode_str(rest).decode_utf8_lossy().into_owned()
         } else {
@@ -380,19 +379,13 @@ mod tests {
 
     #[test]
     fn detect_protocols() {
-        assert_eq!(
-            detect_protocol("https://x.com/a.bin"),
-            Protocol::Http
-        );
+        assert_eq!(detect_protocol("https://x.com/a.bin"), Protocol::Http);
         assert_eq!(detect_protocol("ftp://h/a"), Protocol::Ftp);
         assert_eq!(
             detect_protocol("https://cdn.example/play.m3u8"),
             Protocol::Hls
         );
-        assert_eq!(
-            detect_protocol("magnet:?xt=urn:btih:abc"),
-            Protocol::Magnet
-        );
+        assert_eq!(detect_protocol("magnet:?xt=urn:btih:abc"), Protocol::Magnet);
         assert_eq!(
             detect_protocol("https://ex.com/a.torrent"),
             Protocol::Magnet
@@ -440,10 +433,7 @@ mod tests {
             filename_from_url("https://ex.com/files/%E4%B8%AD%E6%96%87.zip"),
             "中文.zip"
         );
-        assert_eq!(
-            filename_from_url("https://ex.com/a/b/c.tar.gz"),
-            "c.tar.gz"
-        );
+        assert_eq!(filename_from_url("https://ex.com/a/b/c.tar.gz"), "c.tar.gz");
     }
 
     #[test]

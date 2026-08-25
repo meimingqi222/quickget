@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
-use crate::core::urlx::Protocol;
+use crate::core::urlx::{url_identity, Protocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -143,7 +143,8 @@ impl Task {
         if let Some(stem) = dest.file_stem() {
             self.push_leftover(
                 &mut out,
-                self.save_dir.join(format!("{}.hls-tmp", stem.to_string_lossy())),
+                self.save_dir
+                    .join(format!("{}.hls-tmp", stem.to_string_lossy())),
             );
         }
         out
@@ -208,6 +209,76 @@ impl Task {
         } else {
             self.dest_path().join(rel)
         }
+    }
+}
+
+/// `adopt_existing_task` 命中已有任务之后的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdoptResult {
+    /// 排队 / 探测 / 下载中：只更新凭证，不新建。
+    Active(String),
+    /// 暂停 / 失败 / 取消，或已完成但文件没了：重新入队。
+    Requeued(String),
+    /// 已完成且目标还在：不重下。
+    Completed(String),
+}
+
+impl AdoptResult {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Active(n) | Self::Requeued(n) | Self::Completed(n) => n,
+        }
+    }
+}
+
+/// 同一资源（去掉 sid 等 query）已在列表里：更新凭证，失败的重新排队。
+/// 已完成且文件还在则保持完成；文件没了则重新入队。
+pub fn adopt_existing_task(
+    tasks: &mut [Task],
+    url: &str,
+    cookies: Option<String>,
+    referer: Option<String>,
+    ua: Option<String>,
+) -> Option<AdoptResult> {
+    let key = url_identity(url);
+    let idx = tasks
+        .iter()
+        .position(|t| t.status != TaskStatus::Completed && url_identity(&t.url) == key)
+        .or_else(|| {
+            tasks
+                .iter()
+                .position(|t| t.status == TaskStatus::Completed && url_identity(&t.url) == key)
+        })?;
+    let t = &mut tasks[idx];
+    t.url = url.to_string();
+    if cookies.as_ref().is_some_and(|s| !s.is_empty()) {
+        t.cookies = cookies;
+    }
+    if referer.as_ref().is_some_and(|s| !s.is_empty()) {
+        t.referer = referer;
+    }
+    if ua.as_ref().is_some_and(|s| !s.is_empty()) {
+        t.user_agent = ua;
+    }
+    let name = t.filename.clone();
+    match t.status {
+        TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled => {
+            t.status = TaskStatus::Queued;
+            t.error = None;
+            t.finished_at = None;
+            Some(AdoptResult::Requeued(name))
+        }
+        TaskStatus::Completed => {
+            if t.dest_path().exists() {
+                Some(AdoptResult::Completed(name))
+            } else {
+                t.status = TaskStatus::Queued;
+                t.error = None;
+                t.finished_at = None;
+                Some(AdoptResult::Requeued(name))
+            }
+        }
+        _ => Some(AdoptResult::Active(name)),
     }
 }
 
@@ -336,7 +407,10 @@ mod tests {
             peers: BtPeers::default(),
         };
         let paths = t.leftover_paths();
-        let s: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let s: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         assert!(s.iter().any(|p| p.ends_with("a.SAFE")));
         assert!(s.iter().any(|p| p.ends_with("a.SAFE.part")));
         assert!(s.iter().any(|p| p.ends_with("a.SAFE.qg.json")));
@@ -451,12 +525,7 @@ mod tests {
 
     #[test]
     fn dest_path_prefers_bt_output_dir() {
-        let t = magnet_task(
-            "Ubuntu",
-            "/tmp",
-            vec![],
-            Some(PathBuf::from("/tmp/BT")),
-        );
+        let t = magnet_task("Ubuntu", "/tmp", vec![], Some(PathBuf::from("/tmp/BT")));
         assert_eq!(t.dest_path(), PathBuf::from("/tmp/BT"));
     }
 
@@ -599,5 +668,128 @@ mod tests {
             .collect();
         assert!(s.iter().all(|p| p.starts_with("/tmp/")));
         assert!(!s.iter().any(|p| p.contains("secret")));
+    }
+
+    fn http_task(url: &str, filename: &str, save_dir: &Path, status: TaskStatus) -> Task {
+        Task {
+            id: "1".into(),
+            url: url.into(),
+            filename: filename.into(),
+            save_dir: save_dir.to_path_buf(),
+            protocol: crate::core::urlx::Protocol::Http,
+            status,
+            size: 1,
+            downloaded: 1,
+            connections: 1,
+            error: None,
+            created_at: 0,
+            finished_at: None,
+            referer: None,
+            cookies: None,
+            user_agent: None,
+            files: Vec::new(),
+            output_dir: None,
+            peers: BtPeers::default(),
+        }
+    }
+
+    #[test]
+    fn adopt_skips_new_url() {
+        let mut tasks = vec![http_task(
+            "https://ex.com/a.zip",
+            "a.zip",
+            Path::new("/tmp"),
+            TaskStatus::Downloading,
+        )];
+        assert!(
+            adopt_existing_task(&mut tasks, "https://ex.com/b.zip", None, None, None).is_none()
+        );
+    }
+
+    #[test]
+    fn adopt_active_strips_query_and_merges_cookies() {
+        let mut tasks = vec![http_task(
+            "https://ex.com/a.zip?sid=old",
+            "a.zip",
+            Path::new("/tmp"),
+            TaskStatus::Downloading,
+        )];
+        let r = adopt_existing_task(
+            &mut tasks,
+            "https://ex.com/a.zip?sid=new",
+            Some("k=v".into()),
+            Some("https://ex.com/".into()),
+            Some("UA".into()),
+        );
+        assert_eq!(r, Some(AdoptResult::Active("a.zip".into())));
+        assert_eq!(tasks[0].url, "https://ex.com/a.zip?sid=new");
+        assert_eq!(tasks[0].cookies.as_deref(), Some("k=v"));
+        assert_eq!(tasks[0].status, TaskStatus::Downloading);
+    }
+
+    #[test]
+    fn adopt_requeues_paused() {
+        let mut tasks = vec![http_task(
+            "https://ex.com/a.zip",
+            "a.zip",
+            Path::new("/tmp"),
+            TaskStatus::Paused,
+        )];
+        let r = adopt_existing_task(&mut tasks, "https://ex.com/a.zip", None, None, None);
+        assert_eq!(r, Some(AdoptResult::Requeued("a.zip".into())));
+        assert_eq!(tasks[0].status, TaskStatus::Queued);
+    }
+
+    #[test]
+    fn adopt_completed_file_still_there() {
+        let dir = std::env::temp_dir().join(format!("qg-adopt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        let mut tasks = vec![http_task(
+            "https://ex.com/a.zip?sid=1",
+            "a.zip",
+            &dir,
+            TaskStatus::Completed,
+        )];
+        let r = adopt_existing_task(&mut tasks, "https://ex.com/a.zip?sid=2", None, None, None);
+        assert_eq!(r, Some(AdoptResult::Completed("a.zip".into())));
+        assert_eq!(tasks[0].status, TaskStatus::Completed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adopt_completed_missing_file_requeues() {
+        let dir = std::env::temp_dir().join(format!("qg-adopt-miss-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut tasks = vec![http_task(
+            "https://ex.com/a.zip",
+            "a.zip",
+            &dir,
+            TaskStatus::Completed,
+        )];
+        let r = adopt_existing_task(&mut tasks, "https://ex.com/a.zip", None, None, None);
+        assert_eq!(r, Some(AdoptResult::Requeued("a.zip".into())));
+        assert_eq!(tasks[0].status, TaskStatus::Queued);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adopt_prefers_live_task_over_completed() {
+        let dir = std::env::temp_dir().join(format!("qg-adopt-pref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.zip"), b"x").unwrap();
+        let mut tasks = vec![
+            http_task("https://ex.com/a.zip", "a.zip", &dir, TaskStatus::Completed),
+            http_task(
+                "https://ex.com/a.zip",
+                "a (1).zip",
+                &dir,
+                TaskStatus::Downloading,
+            ),
+        ];
+        let r = adopt_existing_task(&mut tasks, "https://ex.com/a.zip", None, None, None);
+        assert_eq!(r, Some(AdoptResult::Active("a (1).zip".into())));
+        assert_eq!(tasks[1].status, TaskStatus::Downloading);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

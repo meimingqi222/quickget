@@ -50,8 +50,8 @@ pub fn open_folder(path: &Path) {
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use winapi::um::shellapi::{
-        SHFileOperationW, SHFILEOPSTRUCTW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
-        FOF_SILENT, FO_DELETE,
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+        SHFILEOPSTRUCTW,
     };
 
     let mut from: Vec<u16> = path

@@ -106,13 +106,7 @@ pub fn download_hls(job: HlsJob<'_>) -> JobOutcome {
                     if ctrl.interrupted() {
                         return;
                     }
-                    match fetch_file(
-                        &client,
-                        &uri,
-                        &dest,
-                        referer.as_deref(),
-                        cookies.as_deref(),
-                    ) {
+                    match fetch_file(&client, &uri, &dest, referer.as_deref(), cookies.as_deref()) {
                         Ok(bytes) => {
                             progress.add(1);
                             let _ = bytes;

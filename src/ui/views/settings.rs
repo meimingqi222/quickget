@@ -62,42 +62,51 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
         ))
         .child(row(
             tr_settings_conn(lang),
-            stepper(conn, 1, 64, |this, v, cx| {
-                this.settings.connections = v;
-                this.settings.save();
-                cx.notify();
-            }, cx),
+            stepper(
+                conn,
+                1,
+                64,
+                |this, v, cx| {
+                    this.settings.connections = v;
+                    this.settings.save();
+                    cx.notify();
+                },
+                cx,
+            ),
         ))
         .child(row(
             tr_settings_conc(lang),
-            stepper(conc, 1, 8, |this, v, cx| {
-                this.settings.max_concurrent = v;
-                this.settings.save();
-                cx.notify();
-            }, cx),
-        ))
-        .child(row(
-            tr_settings_clip(lang),
-            {
-                let on = root.settings.watch_clipboard;
-                small_button(
-                    if on {
-                        tr_on(lang).into()
-                    } else {
-                        tr_off(lang).into()
-                    },
-                    if on { PRIMARY_FIXED } else { SURF },
-                    if on { PRIMARY } else { MUTED },
-                    true,
-                )
-                .id("clip-toggle")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.watch_clipboard = !this.settings.watch_clipboard;
+            stepper(
+                conc,
+                1,
+                8,
+                |this, v, cx| {
+                    this.settings.max_concurrent = v;
                     this.settings.save();
                     cx.notify();
-                }))
-            },
+                },
+                cx,
+            ),
         ))
+        .child(row(tr_settings_clip(lang), {
+            let on = root.settings.watch_clipboard;
+            small_button(
+                if on {
+                    tr_on(lang).into()
+                } else {
+                    tr_off(lang).into()
+                },
+                if on { PRIMARY_FIXED } else { SURF },
+                if on { PRIMARY } else { MUTED },
+                true,
+            )
+            .id("clip-toggle")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings.watch_clipboard = !this.settings.watch_clipboard;
+                this.settings.save();
+                cx.notify();
+            }))
+        }))
         .child(row(
             tr_settings_lang(lang),
             small_button(
@@ -152,9 +161,7 @@ fn stepper(
         .gap_2()
         .child(
             small_button("−".into(), SURF, TEXT, value > min)
-                .id(gpui::SharedString::from(format!(
-                    "step-down-{value}-{min}"
-                )))
+                .id(gpui::SharedString::from(format!("step-down-{value}-{min}")))
                 .on_click(cx.listener(move |this, _, _, cx| down(this, v_down, cx))),
         )
         .child(

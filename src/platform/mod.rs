@@ -9,15 +9,15 @@ pub(crate) fn posix_locale_tag() -> String {
         .unwrap_or_default()
 }
 
-#[cfg(windows)]
-pub mod windows;
 #[cfg(target_os = "macos")]
 pub mod macos;
-
 #[cfg(windows)]
-pub use windows::*;
+pub mod windows;
+
 #[cfg(target_os = "macos")]
 pub use macos::*;
+#[cfg(windows)]
+pub use windows::*;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn detect_system_language() -> crate::core::i18n::Language {
@@ -55,4 +55,3 @@ pub fn move_to_trash(path: &std::path::Path) -> Result<(), String> {
     }
     Err("当前平台没有回收站".into())
 }
-

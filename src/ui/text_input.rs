@@ -58,7 +58,12 @@ pub fn shape_search_line(
             ));
         }
         if marked.end < display.len() {
-            runs.push(search_text_run(display.len() - marked.end, font, color, false));
+            runs.push(search_text_run(
+                display.len() - marked.end,
+                font,
+                color,
+                false,
+            ));
         }
         runs
     } else {

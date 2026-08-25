@@ -89,17 +89,9 @@ pub fn render_sidebar(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
                         .px_2()
                         .py(px(1.))
                         .rounded_full()
-                        .bg(if active {
-                            rgb(PRIMARY)
-                        } else {
-                            rgb(SURF_HIGH)
-                        })
+                        .bg(if active { rgb(PRIMARY) } else { rgb(SURF_HIGH) })
                         .text_xs()
-                        .text_color(if active {
-                            rgb(ON_PRIMARY)
-                        } else {
-                            rgb(MUTED)
-                        })
+                        .text_color(if active { rgb(ON_PRIMARY) } else { rgb(MUTED) })
                         .child(count.to_string()),
                 )
             })

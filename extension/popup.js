@@ -26,3 +26,21 @@ document.getElementById("send").addEventListener("click", () => {
     }
   });
 });
+
+document.getElementById("open").addEventListener("click", () => {
+  statusEl.className = "";
+  statusEl.textContent = "正在打开…";
+  chrome.runtime.sendMessage({ type: "open-app" }, (resp) => {
+    if (chrome.runtime.lastError) {
+      statusEl.className = "err";
+      statusEl.textContent = chrome.runtime.lastError.message;
+      return;
+    }
+    if (resp && resp.ok) {
+      statusEl.textContent = "已请求打开 QuickGet";
+    } else {
+      statusEl.className = "err";
+      statusEl.textContent = (resp && resp.error) || "QuickGet 未运行，请先打开应用";
+    }
+  });
+});

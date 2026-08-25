@@ -29,6 +29,12 @@
     }
     .primary { background: #005faa; color: #fff; }
     .primary:hover { background: #0078d4; }
+    .ghost {
+      margin-top: 8px;
+      background: #eceff3;
+      color: #1a1c1c;
+    }
+    .ghost:hover { background: #dfe3e8; }
     label {
       display: flex;
       align-items: center;
@@ -51,10 +57,12 @@
     <h1>QuickGet</h1>
     <p>把当前页或右键链接发给本机下载器，带上登录 Cookie。</p>
     <button class="primary" id="send">下载当前页</button>
+    <button class="ghost" id="open">打开 QuickGet</button>
     <label>
       <input type="checkbox" id="intercept" />
       接管浏览器下载（默认关）
     </label>
+    <p style="margin:6px 0 0;font-size:12px;color:#717783">只拦你刚点的下载。浏览器自己恢复的历史任务会跳过。</p>
     <div id="status"></div>
   </main>
   <script src="popup.js"></script>

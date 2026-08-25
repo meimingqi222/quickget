@@ -96,10 +96,100 @@ pub fn tr_btn_reveal(lang: Language) -> &'static str {
         Language::En => "Reveal",
     }
 }
+pub fn tr_btn_pause_all(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "全部暂停",
+        Language::En => "Pause all",
+    }
+}
+pub fn tr_btn_resume_all(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "全部继续",
+        Language::En => "Resume all",
+    }
+}
 pub fn tr_btn_clear_done(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "清除已完成",
         Language::En => "Clear completed",
+    }
+}
+pub fn tr_btn_cancel(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "取消",
+        Language::En => "Cancel",
+    }
+}
+pub fn tr_confirm_delete_title(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "删除这个任务？",
+        Language::En => "Delete this task?",
+    }
+}
+pub fn tr_confirm_delete_body(lang: Language, name: &str) -> String {
+    match lang {
+        Language::Zh => format!("「{name}」会从列表里去掉，相关文件会移到废纸篓。"),
+        Language::En => {
+            format!("“{name}” will be removed from the list, and its files moved to Trash.")
+        }
+    }
+}
+pub fn tr_confirm_delete_action(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "删除",
+        Language::En => "Delete",
+    }
+}
+pub fn tr_confirm_clear_title(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "清除已完成的任务？",
+        Language::En => "Clear completed tasks?",
+    }
+}
+pub fn tr_confirm_clear_body(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("从列表移除 {n} 项，文件仍留在下载目录。"),
+        Language::En => {
+            format!("Remove {n} completed items from the list. Files stay in the download folder.")
+        }
+    }
+}
+pub fn tr_confirm_clear_action(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "清除",
+        Language::En => "Clear",
+    }
+}
+pub fn tr_confirm_add_title(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("添加 {n} 个下载任务？"),
+        Language::En => format!("Add {n} downloads?"),
+    }
+}
+pub fn tr_confirm_add_body(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("短时间内收到 {n} 项。确认后才会开始下载。"),
+        Language::En => {
+            format!("{n} items arrived together. They will start only after you confirm.")
+        }
+    }
+}
+pub fn tr_confirm_add_action(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "添加",
+        Language::En => "Add",
+    }
+}
+pub fn tr_confirm_add_more(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("还有 {n} 个"),
+        Language::En => {
+            if n == 1 {
+                "and 1 more".into()
+            } else {
+                format!("and {n} more")
+            }
+        }
     }
 }
 pub fn tr_btn_browse(lang: Language) -> &'static str {
@@ -233,6 +323,12 @@ pub fn tr_status_already(lang: Language, name: &str) -> String {
         Language::En => format!("Already downloading: {name}"),
     }
 }
+pub fn tr_status_already_done(lang: Language, name: &str) -> String {
+    match lang {
+        Language::Zh => format!("已下载过：{name}"),
+        Language::En => format!("Already downloaded: {name}"),
+    }
+}
 pub fn tr_status_bad_url(lang: Language) -> String {
     match lang {
         Language::Zh => "无法识别的链接。".into(),
@@ -258,6 +354,24 @@ pub fn tr_status_paused(lang: Language, name: &str) -> String {
         Language::En => format!("Paused: {name}"),
     }
 }
+pub fn tr_status_paused_all(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已暂停 {n} 项"),
+        Language::En => format!("Paused {n} items"),
+    }
+}
+pub fn tr_status_resumed_all(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已继续 {n} 项"),
+        Language::En => format!("Resumed {n} items"),
+    }
+}
+pub fn tr_status_held_captures(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已加入 {n} 项，先暂停"),
+        Language::En => format!("Added {n} items, paused"),
+    }
+}
 pub fn tr_status_speed(lang: Language, speed: &str, n: usize) -> String {
     match lang {
         Language::Zh => format!("下载中 {n} 项 · {speed}"),
@@ -268,6 +382,12 @@ pub fn tr_clipboard_hint(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "剪贴板中有链接，是否下载？",
         Language::En => "Clipboard has a URL. Download it?",
+    }
+}
+pub fn tr_clipboard_hint_n(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("剪贴板中有 {n} 条链接，是否下载？"),
+        Language::En => format!("Clipboard has {n} URLs. Download them?"),
     }
 }
 
@@ -329,7 +449,9 @@ pub fn tr_settings_lang(lang: Language) -> &'static str {
 pub fn tr_settings_blurb(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "支持 HTTP / HTTPS / FTP / HLS / BT。多连接分段下载，支持断点续传。",
-        Language::En => "HTTP, HTTPS, FTP, HLS, BitTorrent. Multi-connection segmented download with resume.",
+        Language::En => {
+            "HTTP, HTTPS, FTP, HLS, BitTorrent. Multi-connection segmented download with resume."
+        }
     }
 }
 pub fn tr_settings_ext(lang: Language) -> &'static str {
@@ -396,6 +518,36 @@ mod tests {
                 }
             ),
             "8 live · 20 seen"
+        );
+    }
+
+    #[test]
+    fn confirm_copy_mentions_trash_and_keeps_files() {
+        assert!(tr_confirm_delete_body(Language::Zh, "a.zip").contains("废纸篓"));
+        assert!(tr_confirm_delete_body(Language::En, "a.zip").contains("Trash"));
+        assert!(tr_confirm_clear_body(Language::Zh, 3).contains("3"));
+        assert!(tr_confirm_clear_body(Language::En, 3).contains("download folder"));
+    }
+
+    #[test]
+    fn bulk_add_confirm_mentions_count() {
+        assert!(tr_confirm_add_title(Language::Zh, 12).contains("12"));
+        assert!(tr_confirm_add_body(Language::Zh, 12).contains("12"));
+        assert!(tr_confirm_add_body(Language::En, 12).contains("12"));
+        assert_eq!(tr_confirm_add_more(Language::Zh, 4), "还有 4 个");
+        assert_eq!(
+            tr_clipboard_hint_n(Language::Zh, 5),
+            "剪贴板中有 5 条链接，是否下载？"
+        );
+        assert_eq!(tr_btn_pause_all(Language::Zh), "全部暂停");
+        assert_eq!(tr_btn_resume_all(Language::En), "Resume all");
+        assert_eq!(
+            tr_status_held_captures(Language::Zh, 3),
+            "已加入 3 项，先暂停"
+        );
+        assert_eq!(
+            tr_status_held_captures(Language::En, 3),
+            "Added 3 items, paused"
         );
     }
 }

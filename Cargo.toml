@@ -33,7 +33,7 @@ libc = "0.2"
 objc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["wincon", "winnls", "winuser", "shellapi", "processthreadsapi", "handleapi", "winnt", "winreg"] }
+winapi = { version = "0.3", features = ["wincon", "winnls", "winuser", "shellapi", "processthreadsapi", "handleapi", "winnt", "winreg", "fileapi", "minwinbase"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"

@@ -3,12 +3,14 @@
 use crate::ui::components::buttons::{ghost_button, primary_button};
 use crate::ui::components::icons::icon_link;
 use crate::ui::i18n::*;
-use crate::ui::text_input::{clamp_to_boundary, index_for_mouse_x, paint_search_text, SearchTextPaint};
+use crate::ui::text_input::{
+    clamp_to_boundary, index_for_mouse_x, paint_search_text, SearchTextPaint,
+};
 use crate::ui::theme::*;
 use crate::ui::Root;
 use gpui::{
-    div, prelude::*, px, rgb, Bounds, Context, DispatchPhase, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window,
+    div, prelude::*, px, rgb, Bounds, Context, DispatchPhase, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window,
 };
 
 pub fn render_url_bar(root: &Root, window: &Window, cx: &mut Context<Root>) -> impl IntoElement {
@@ -132,10 +134,8 @@ pub fn render_url_bar(root: &Root, window: &Window, cx: &mut Context<Root>) -> i
             match event.keystroke.key.as_str() {
                 "backspace" => {
                     let input = &mut this.url_input;
-                    input.sel = crate::ui::text_input::delete_backward(
-                        &mut input.text,
-                        input.sel.clone(),
-                    );
+                    input.sel =
+                        crate::ui::text_input::delete_backward(&mut input.text, input.sel.clone());
                     input.marked = None;
                     cx.notify();
                 }

@@ -9,23 +9,31 @@ pub mod views;
 
 pub use state::*;
 
+use crate::core::capture::CaptureJob;
 use crate::core::engine::run_task;
 use crate::core::i18n::{bilingual, Language, Text};
-use crate::core::model::{fmt_speed, Task, TaskStatus};
+use crate::core::model::{adopt_existing_task, fmt_speed, truncate, AdoptResult, Task, TaskStatus};
 use crate::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use crate::core::settings::Settings;
 use crate::core::urlx::{
     detect_protocol, extract_urls, filename_from_source, filename_from_url, is_bt_placeholder,
-    unique_path, url_identity, Protocol,
+    unique_path, Protocol,
 };
 use crate::ui::components::{render_sidebar, render_url_bar, View};
 use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::views::{render_settings_view, render_tasks_view};
 use gpui::{
-    div, prelude::*, px, rgb, Context, IntoElement, Render, ScrollHandle, Task as GpuiTask, Window,
+    div, prelude::*, px, rgb, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render,
+    ScrollHandle, Task as GpuiTask, Window,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// 短时间进来这么多项就先确认再下，避免页面接管/粘贴列表把队列灌满。
+const BULK_ADD_THRESHOLD: usize = 3;
+/// 扩展投递是一条条进收件箱的，等这一小会儿看是不是一批。
+const CAPTURE_BURST_QUIET_MS: u64 = 800;
+const BULK_PREVIEW_LIMIT: usize = 8;
 
 pub struct Root {
     pub language: Language,
@@ -49,6 +57,18 @@ pub struct Root {
     pub detail_scroll: ScrollHandle,
     /// 详情文件列表滚动条拖拽：(按下时鼠标 y, 当时的滚动偏移)。
     pub detail_scroll_drag: Option<(f32, f32)>,
+    pub pending_confirm: Option<PendingConfirm>,
+    confirm_focus: FocusHandle,
+    pending_captures: Vec<CaptureJob>,
+    capture_flush_task: Option<GpuiTask<()>>,
+    capture_flush_gen: u64,
+}
+
+pub enum PendingConfirm {
+    RemoveTask { id: String, filename: String },
+    ClearDone { count: usize },
+    AddUrls { urls: Vec<String> },
+    AddCaptures { jobs: Vec<CaptureJob> },
 }
 
 impl Root {
@@ -83,6 +103,11 @@ impl Root {
             expanded_task: None,
             detail_scroll: ScrollHandle::new(),
             detail_scroll_drag: None,
+            pending_confirm: None,
+            confirm_focus: cx.focus_handle(),
+            pending_captures: Vec::new(),
+            capture_flush_task: None,
+            capture_flush_gen: 0,
         };
         crate::core::capture::write_pid();
         crate::core::capture::install_native_host();
@@ -115,14 +140,43 @@ impl Root {
             .filter(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Cancelled))
             .count()
     }
+    pub fn count_pausable(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    TaskStatus::Queued | TaskStatus::Probing | TaskStatus::Downloading
+                )
+            })
+            .count()
+    }
+    pub fn count_paused(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| {
+                if t.status == TaskStatus::Paused {
+                    return true;
+                }
+                matches!(t.status, TaskStatus::Probing | TaskStatus::Downloading)
+                    && self.runtime.get(&t.id).is_some_and(|s| s.ctrl.is_pause())
+            })
+            .count()
+    }
 
     pub fn persist(&self) {
         crate::core::store::save(&self.tasks);
     }
 
     pub fn submit_url(&mut self, cx: &mut Context<Self>) {
+        if self.pending_confirm.is_some() {
+            return;
+        }
         let raw = self.url_input.text.clone();
         self.add_urls(&raw, cx);
+        if matches!(self.pending_confirm, Some(PendingConfirm::AddUrls { .. })) {
+            return;
+        }
         if !self.url_input.text.is_empty() {
             // 成功吃进去才清空
             let added = extract_urls(&raw);
@@ -143,22 +197,34 @@ impl Root {
     }
 
     pub fn add_urls(&mut self, raw: &str, cx: &mut Context<Self>) {
-        let urls = extract_urls(raw);
+        if self.pending_confirm.is_some() {
+            return;
+        }
+        let urls = collect_downloadable_urls(raw);
         if urls.is_empty() {
             self.status = bilingual(|l| tr_status_bad_url(l));
             cx.notify();
             return;
         }
+        if should_confirm_bulk(urls.len()) {
+            self.pending_confirm = Some(PendingConfirm::AddUrls { urls });
+            cx.notify();
+            return;
+        }
+        self.commit_urls(urls, cx);
+    }
+
+    fn commit_urls(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
         let mut last_name = String::new();
-        let mut last_already = false;
+        let mut last_kind: Option<AdoptResult> = None;
         for url in urls {
             let proto = detect_protocol(&url);
             if proto == Protocol::Unknown {
                 continue;
             }
-            if let Some((name, fresh)) = self.adopt_existing(&url, None, None, None) {
-                last_name = name;
-                last_already = !fresh;
+            if let Some(adopted) = self.adopt_existing(&url, None, None, None) {
+                last_name = adopted.name().to_string();
+                last_kind = Some(adopted);
                 continue;
             }
             let filename_raw = if proto == Protocol::Hls {
@@ -195,14 +261,18 @@ impl Root {
                 peers: Default::default(),
             };
             last_name = filename;
-            last_already = false;
+            last_kind = None;
             self.tasks.insert(0, task);
         }
         if !last_name.is_empty() {
-            self.status = if last_already {
-                bilingual(|l| tr_status_already(l, &last_name))
-            } else {
-                bilingual(|l| tr_status_added(l, &last_name))
+            self.status = match last_kind {
+                Some(AdoptResult::Completed(_)) => {
+                    bilingual(|l| tr_status_already_done(l, &last_name))
+                }
+                Some(AdoptResult::Active(_)) => bilingual(|l| tr_status_already(l, &last_name)),
+                Some(AdoptResult::Requeued(_)) | None => {
+                    bilingual(|l| tr_status_added(l, &last_name))
+                }
             };
         }
         self.persist();
@@ -210,7 +280,11 @@ impl Root {
         cx.notify();
     }
 
-    pub fn add_capture(&mut self, job: crate::core::capture::CaptureJob, cx: &mut Context<Self>) {
+    pub fn add_capture(&mut self, job: CaptureJob, cx: &mut Context<Self>) {
+        self.ingest_capture(job, TaskStatus::Queued, cx);
+    }
+
+    fn ingest_capture(&mut self, job: CaptureJob, status: TaskStatus, cx: &mut Context<Self>) {
         let url = job.url.trim().to_string();
         if url.is_empty() {
             return;
@@ -221,16 +295,21 @@ impl Root {
             cx.notify();
             return;
         }
-        if let Some((name, fresh)) =
-            self.adopt_existing(&url, job.cookies.clone(), job.referer.clone(), job.ua.clone())
-        {
-            self.status = if fresh {
-                bilingual(|l| tr_status_added(l, &name))
-            } else {
-                bilingual(|l| tr_status_already(l, &name))
+        if let Some(adopted) = self.adopt_existing(
+            &url,
+            job.cookies.clone(),
+            job.referer.clone(),
+            job.ua.clone(),
+        ) {
+            let name = adopted.name().to_string();
+            self.status = match adopted {
+                AdoptResult::Requeued(_) => bilingual(|l| tr_status_added(l, &name)),
+                AdoptResult::Active(_) => bilingual(|l| tr_status_already(l, &name)),
+                AdoptResult::Completed(_) => bilingual(|l| tr_status_already_done(l, &name)),
             };
             self.persist();
             self.pump_queue(cx);
+            raise_gui(cx);
             cx.notify();
             return;
         }
@@ -253,7 +332,7 @@ impl Root {
             filename: filename.clone(),
             save_dir: self.settings.save_dir.clone(),
             protocol: proto,
-            status: TaskStatus::Queued,
+            status,
             size: 0,
             downloaded: 0,
             connections: self.settings.connections_clamped(),
@@ -272,45 +351,82 @@ impl Root {
             peers: Default::default(),
         };
         self.tasks.insert(0, task);
-        self.status = bilingual(|l| tr_status_added(l, &filename));
+        self.status = if status == TaskStatus::Paused {
+            bilingual(|l| tr_status_paused(l, &filename))
+        } else {
+            bilingual(|l| tr_status_added(l, &filename))
+        };
         self.persist();
         self.pump_queue(cx);
+        raise_gui(cx);
         cx.notify();
     }
 
     /// 同一资源（去掉 sid 等 query）已在列表里：更新凭证，失败的重新排队。
-    /// 返回 `(文件名, 是否重新入队)`。
     fn adopt_existing(
         &mut self,
         url: &str,
         cookies: Option<String>,
         referer: Option<String>,
         ua: Option<String>,
-    ) -> Option<(String, bool)> {
-        let key = url_identity(url);
-        let idx = self.tasks.iter().position(|t| {
-            t.status != TaskStatus::Completed && url_identity(&t.url) == key
-        })?;
-        let t = &mut self.tasks[idx];
-        t.url = url.to_string();
-        if cookies.as_ref().is_some_and(|s| !s.is_empty()) {
-            t.cookies = cookies;
+    ) -> Option<AdoptResult> {
+        adopt_existing_task(&mut self.tasks, url, cookies, referer, ua)
+    }
+
+    fn buffer_captures(&mut self, jobs: Vec<CaptureJob>, cx: &mut Context<Self>) {
+        if jobs.is_empty() {
+            return;
         }
-        if referer.as_ref().is_some_and(|s| !s.is_empty()) {
-            t.referer = referer;
+        if let Some(PendingConfirm::AddCaptures { jobs: pending }) = &mut self.pending_confirm {
+            pending.extend(jobs);
+            raise_gui(cx);
+            cx.notify();
+            return;
         }
-        if ua.as_ref().is_some_and(|s| !s.is_empty()) {
-            t.user_agent = ua;
+        self.pending_captures.extend(jobs);
+        if self.pending_captures.len() >= BULK_ADD_THRESHOLD && self.pending_confirm.is_none() {
+            let jobs = std::mem::take(&mut self.pending_captures);
+            self.pending_confirm = Some(PendingConfirm::AddCaptures { jobs });
+            raise_gui(cx);
+            cx.notify();
+            return;
         }
-        let name = t.filename.clone();
-        match t.status {
-            TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled => {
-                t.status = TaskStatus::Queued;
-                t.error = None;
-                t.finished_at = None;
-                Some((name, true))
-            }
-            _ => Some((name, false)),
+        self.schedule_capture_flush(cx);
+    }
+
+    fn schedule_capture_flush(&mut self, cx: &mut Context<Self>) {
+        self.capture_flush_gen = self.capture_flush_gen.wrapping_add(1);
+        let gen = self.capture_flush_gen;
+        self.capture_flush_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(CAPTURE_BURST_QUIET_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.capture_flush_gen != gen {
+                    return;
+                }
+                this.flush_captures(cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn flush_captures(&mut self, cx: &mut Context<Self>) {
+        if self.pending_confirm.is_some() {
+            return;
+        }
+        let jobs = std::mem::take(&mut self.pending_captures);
+        if jobs.is_empty() {
+            return;
+        }
+        if should_confirm_bulk(jobs.len()) {
+            self.pending_confirm = Some(PendingConfirm::AddCaptures { jobs });
+            raise_gui(cx);
+            cx.notify();
+            return;
+        }
+        for job in jobs {
+            self.add_capture(job, cx);
         }
     }
 
@@ -323,8 +439,13 @@ impl Root {
                 .timer(Duration::from_millis(400))
                 .await;
             this.update(cx, |this, cx| {
-                for job in crate::core::capture::drain() {
-                    this.add_capture(job, cx);
+                let raise = crate::core::capture::take_raise();
+                let jobs = crate::core::capture::drain();
+                if raise && jobs.is_empty() && this.pending_confirm.is_none() {
+                    raise_gui(cx);
+                }
+                if !jobs.is_empty() {
+                    this.buffer_captures(jobs, cx);
                 }
             })
             .ok();
@@ -369,9 +490,9 @@ impl Root {
         let progress_bg = progress.clone();
         let meta_bg = meta.clone();
 
-        let work = cx.background_executor().spawn(async move {
-            run_task(&task, &ua, progress_bg, ctrl_bg, meta_bg)
-        });
+        let work = cx
+            .background_executor()
+            .spawn(async move { run_task(&task, &ua, progress_bg, ctrl_bg, meta_bg) });
         let id_owned = id.to_string();
         let gpui_task = cx.spawn(async move |this, cx| {
             let outcome = work.await;
@@ -402,6 +523,11 @@ impl Root {
             .get(id)
             .map(|s| s.meta.snapshot())
             .unwrap_or_default();
+        let pause_still_wanted = self
+            .runtime
+            .get(id)
+            .map(|s| s.ctrl.is_pause())
+            .unwrap_or(true);
         let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
             return;
         };
@@ -441,13 +567,17 @@ impl Root {
                 self.status = bilingual(|l| tr_status_done(l, &name));
             }
             JobOutcome::Paused { downloaded, size } => {
-                t.status = TaskStatus::Paused;
                 t.downloaded = downloaded;
                 if size > 0 {
                     t.size = size;
                 }
-                let name = t.filename.clone();
-                self.status = bilingual(|l| tr_status_paused(l, &name));
+                t.status = status_after_engine_pause(pause_still_wanted);
+                if pause_still_wanted {
+                    let name = t.filename.clone();
+                    self.status = bilingual(|l| tr_status_paused(l, &name));
+                } else {
+                    t.error = None;
+                }
             }
             JobOutcome::Cancelled => {
                 t.status = TaskStatus::Cancelled;
@@ -476,6 +606,33 @@ impl Root {
         cx.notify();
     }
 
+    pub fn pause_all(&mut self, cx: &mut Context<Self>) {
+        let mut queued = 0usize;
+        let mut active = 0usize;
+        for t in &mut self.tasks {
+            match t.status {
+                TaskStatus::Queued => {
+                    t.status = TaskStatus::Paused;
+                    queued += 1;
+                }
+                TaskStatus::Probing | TaskStatus::Downloading => {
+                    active += 1;
+                }
+                _ => {}
+            }
+        }
+        self.runtime.pause_all();
+        let n = queued + active;
+        if n == 0 {
+            return;
+        }
+        if queued > 0 {
+            self.persist();
+        }
+        self.status = bilingual(|l| tr_status_paused_all(l, n));
+        cx.notify();
+    }
+
     pub fn resume_task(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
             t.status = TaskStatus::Queued;
@@ -484,6 +641,100 @@ impl Root {
         self.persist();
         self.pump_queue(cx);
         cx.notify();
+    }
+
+    pub fn resume_all(&mut self, cx: &mut Context<Self>) {
+        let pausing_active = self
+            .tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.status, TaskStatus::Probing | TaskStatus::Downloading)
+                    && self.runtime.get(&t.id).is_some_and(|s| s.ctrl.is_pause())
+            })
+            .count();
+        let mut n = pausing_active;
+        for t in &mut self.tasks {
+            if t.status == TaskStatus::Paused {
+                t.status = TaskStatus::Queued;
+                t.error = None;
+                n += 1;
+            }
+        }
+        self.runtime.resume_all();
+        if n == 0 {
+            return;
+        }
+        self.status = bilingual(|l| tr_status_resumed_all(l, n));
+        self.persist();
+        self.pump_queue(cx);
+        cx.notify();
+    }
+
+    pub fn request_remove_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.tasks.iter().find(|t| t.id == id) else {
+            return;
+        };
+        self.pending_confirm = Some(PendingConfirm::RemoveTask {
+            id: t.id.clone(),
+            filename: t.filename.clone(),
+        });
+        self.confirm_focus.focus(window);
+        cx.notify();
+    }
+
+    pub fn request_clear_done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.count_done();
+        if count == 0 {
+            return;
+        }
+        self.pending_confirm = Some(PendingConfirm::ClearDone { count });
+        self.confirm_focus.focus(window);
+        cx.notify();
+    }
+
+    pub fn dismiss_confirm(&mut self, cx: &mut Context<Self>) {
+        match self.pending_confirm.take() {
+            Some(PendingConfirm::AddCaptures { jobs }) => {
+                let n = jobs.len();
+                for job in jobs {
+                    self.ingest_capture(job, TaskStatus::Paused, cx);
+                }
+                if n > 0 {
+                    self.status = bilingual(|l| tr_status_held_captures(l, n));
+                }
+                if !self.pending_captures.is_empty() {
+                    self.schedule_capture_flush(cx);
+                }
+                cx.notify();
+            }
+            Some(_) => {
+                if !self.pending_captures.is_empty() {
+                    self.schedule_capture_flush(cx);
+                }
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
+    pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
+        match self.pending_confirm.take() {
+            Some(PendingConfirm::RemoveTask { id, .. }) => self.remove_task(&id, cx),
+            Some(PendingConfirm::ClearDone { .. }) => self.clear_done(cx),
+            Some(PendingConfirm::AddUrls { urls }) => {
+                self.commit_urls(urls, cx);
+                self.url_input.clear();
+            }
+            Some(PendingConfirm::AddCaptures { jobs }) => {
+                for job in jobs {
+                    self.add_capture(job, cx);
+                }
+            }
+            None => {}
+        }
+        if !self.pending_captures.is_empty() {
+            self.schedule_capture_flush(cx);
+        }
     }
 
     pub fn remove_task(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -500,10 +751,7 @@ impl Root {
         cx.notify();
         if !wait_for_stop {
             if let Some(task) = task {
-                crate::core::io::trash_paths(&leftover_paths_for_remove(
-                    task,
-                    live_meta.as_ref(),
-                ));
+                crate::core::io::trash_paths(&leftover_paths_for_remove(task, live_meta.as_ref()));
             }
             self.runtime.remove(id);
             return;
@@ -577,11 +825,7 @@ impl Root {
                     if this.runtime.sync_into(&mut this.tasks) {
                         this.persist();
                     }
-                    let n = this
-                        .tasks
-                        .iter()
-                        .filter(|t| t.status.is_active())
-                        .count();
+                    let n = this.tasks.iter().filter(|t| t.status.is_active()).count();
                     if n > 0 {
                         let speed = fmt_speed(this.runtime.total_speed());
                         this.status = bilingual(|l| tr_status_speed(l, &speed, n));
@@ -667,6 +911,26 @@ impl Root {
     }
 }
 
+fn raise_gui(cx: &mut Context<Root>) {
+    cx.activate(true);
+    let handles = cx.windows();
+    cx.defer(move |cx| {
+        for handle in handles {
+            let _ = handle.update(cx, |_, window, _| {
+                window.activate_window();
+            });
+        }
+    });
+}
+
+fn status_after_engine_pause(pause_still_wanted: bool) -> TaskStatus {
+    if pause_still_wanted {
+        TaskStatus::Paused
+    } else {
+        TaskStatus::Queued
+    }
+}
+
 fn leftover_paths_for_remove(mut task: Task, meta: Option<&LiveMeta>) -> Vec<std::path::PathBuf> {
     if let Some(meta) = meta {
         let snap = meta.snapshot();
@@ -698,6 +962,9 @@ impl Render for Root {
         if self.cursor_blink_wanted {
             self.ensure_cursor_blink(cx);
         }
+        if self.pending_confirm.is_some() && !self.confirm_focus.is_focused(window) {
+            self.confirm_focus.focus(window);
+        }
 
         let content = if self.view == View::Settings {
             render_settings_view(self, cx).into_any_element()
@@ -714,8 +981,14 @@ impl Render for Root {
             .flex_col()
             .child(render_url_bar(self, window, cx));
 
-        if let Some(_hint) = self.clip_hint.as_ref() {
+        if let Some(hint) = self.clip_hint.as_ref() {
             let lang = self.language;
+            let n = extract_urls(hint).len();
+            let hint_text = if n > 1 {
+                tr_clipboard_hint_n(lang, n)
+            } else {
+                tr_clipboard_hint(lang).to_string()
+            };
             main = main.child(
                 div()
                     .flex_none()
@@ -730,7 +1003,7 @@ impl Render for Root {
                             .flex_1()
                             .text_sm()
                             .text_color(rgb(PRIMARY))
-                            .child(tr_clipboard_hint(lang)),
+                            .child(hint_text),
                     )
                     .child(
                         crate::ui::components::small_button(
@@ -743,17 +1016,12 @@ impl Render for Root {
                         .on_click(cx.listener(|this, _, _, cx| this.accept_clip_hint(cx))),
                     )
                     .child(
-                        crate::ui::components::small_button(
-                            "✕".into(),
-                            SURF_LOW,
-                            MUTED,
-                            true,
-                        )
-                        .id("clip-no")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.clip_hint = None;
-                            cx.notify();
-                        })),
+                        crate::ui::components::small_button("✕".into(), SURF_LOW, MUTED, true)
+                            .id("clip-no")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clip_hint = None;
+                                cx.notify();
+                            })),
                     ),
             );
         }
@@ -790,5 +1058,235 @@ impl Render for Root {
                     .border_color(rgba(OUTLINE_VAR, 0.6))
                     .child(self.status.get(self.language).to_string()),
             )
+            .when(self.pending_confirm.is_some(), |d| {
+                d.child(render_confirm_overlay(self, cx))
+            })
+    }
+}
+
+fn render_confirm_overlay(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
+    let lang = root.language;
+    let (title, body, action, danger, names, extra) = match root.pending_confirm.as_ref() {
+        Some(PendingConfirm::RemoveTask { filename, .. }) => (
+            tr_confirm_delete_title(lang).to_string(),
+            tr_confirm_delete_body(lang, &truncate(filename, 48)),
+            tr_confirm_delete_action(lang).to_string(),
+            true,
+            Vec::new(),
+            0usize,
+        ),
+        Some(PendingConfirm::ClearDone { count }) => (
+            tr_confirm_clear_title(lang).to_string(),
+            tr_confirm_clear_body(lang, *count),
+            tr_confirm_clear_action(lang).to_string(),
+            true,
+            Vec::new(),
+            0,
+        ),
+        Some(PendingConfirm::AddUrls { urls }) => {
+            let (names, extra) = bulk_preview(urls.iter().map(|u| preview_name_for_url(u)));
+            (
+                tr_confirm_add_title(lang, urls.len()),
+                tr_confirm_add_body(lang, urls.len()),
+                tr_confirm_add_action(lang).to_string(),
+                false,
+                names,
+                extra,
+            )
+        }
+        Some(PendingConfirm::AddCaptures { jobs }) => {
+            let (names, extra) = bulk_preview(jobs.iter().map(preview_name_for_job));
+            (
+                tr_confirm_add_title(lang, jobs.len()),
+                tr_confirm_add_body(lang, jobs.len()),
+                tr_confirm_add_action(lang).to_string(),
+                false,
+                names,
+                extra,
+            )
+        }
+        None => (
+            String::new(),
+            String::new(),
+            String::new(),
+            true,
+            Vec::new(),
+            0,
+        ),
+    };
+    let fh = root.confirm_focus.clone();
+    let ok_bg = if danger { ERROR } else { PRIMARY };
+
+    div()
+        .id("confirm-mask")
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(TEXT, 0.32))
+        .occlude()
+        .track_focus(&fh)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                if matches!(
+                    this.pending_confirm,
+                    Some(PendingConfirm::AddCaptures { .. })
+                ) {
+                    return;
+                }
+                this.dismiss_confirm(cx);
+            }),
+        )
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            match event.keystroke.key.as_str() {
+                "escape" => this.dismiss_confirm(cx),
+                "enter" | "return" => this.confirm_pending(cx),
+                _ => {}
+            }
+        }))
+        .child(
+            div()
+                .id("confirm-dialog")
+                .w(px(440.))
+                .rounded_xl()
+                .bg(rgb(CARD))
+                .border_1()
+                .border_color(rgb(OUTLINE_VAR))
+                .px_5()
+                .py_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child(title),
+                )
+                .child(div().text_sm().text_color(rgb(MUTED)).child(body))
+                .when(!names.is_empty(), |d| {
+                    let mut list = div()
+                        .id("confirm-add-list")
+                        .w_full()
+                        .max_h(px(180.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.));
+                    for name in names {
+                        list = list.child(div().text_xs().text_color(rgb(TEXT)).child(name));
+                    }
+                    if extra > 0 {
+                        list = list.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(tr_confirm_add_more(lang, extra)),
+                        );
+                    }
+                    d.child(list)
+                })
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            crate::ui::components::ghost_button(tr_btn_cancel(lang).into(), true)
+                                .id("confirm-cancel")
+                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_confirm(cx))),
+                        )
+                        .child(
+                            crate::ui::components::small_button(action, ok_bg, ON_PRIMARY, true)
+                                .id("confirm-ok")
+                                .on_click(cx.listener(|this, _, _, cx| this.confirm_pending(cx))),
+                        ),
+                ),
+        )
+}
+
+fn should_confirm_bulk(count: usize) -> bool {
+    count >= BULK_ADD_THRESHOLD
+}
+
+fn collect_downloadable_urls(raw: &str) -> Vec<String> {
+    extract_urls(raw)
+        .into_iter()
+        .filter(|u| detect_protocol(u) != Protocol::Unknown)
+        .collect()
+}
+
+fn bulk_preview<I, S>(names: I) -> (Vec<String>, usize)
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let all: Vec<String> = names.into_iter().map(Into::into).collect();
+    let extra = all.len().saturating_sub(BULK_PREVIEW_LIMIT);
+    let shown = all.into_iter().take(BULK_PREVIEW_LIMIT).collect();
+    (shown, extra)
+}
+
+fn preview_name_for_url(url: &str) -> String {
+    let proto = detect_protocol(url);
+    let raw = if proto == Protocol::Hls {
+        crate::core::hls::default_hls_filename(url)
+    } else if proto == Protocol::Magnet {
+        filename_from_source(url)
+    } else {
+        filename_from_url(url)
+    };
+    truncate(&raw, 56)
+}
+
+fn preview_name_for_job(job: &CaptureJob) -> String {
+    if let Some(name) = job.filename.as_ref() {
+        let t = name.trim();
+        if !t.is_empty() {
+            return truncate(t, 56);
+        }
+    }
+    preview_name_for_url(&job.url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_threshold_is_three() {
+        assert!(!should_confirm_bulk(0));
+        assert!(!should_confirm_bulk(1));
+        assert!(!should_confirm_bulk(2));
+        assert!(should_confirm_bulk(3));
+        assert!(should_confirm_bulk(20));
+    }
+
+    #[test]
+    fn collect_urls_skips_junk_lines() {
+        let raw = "https://a.com/1.zip\nnot a url\nhttps://b.com/2.mp4\nftp://c.com/3.bin\n";
+        let v = collect_downloadable_urls(raw);
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn bulk_preview_caps_list_and_counts_rest() {
+        let names = (0..12).map(|i| format!("f{i}.bin"));
+        let (shown, extra) = bulk_preview(names);
+        assert_eq!(shown.len(), BULK_PREVIEW_LIMIT);
+        assert_eq!(extra, 4);
+        assert_eq!(shown[0], "f0.bin");
+    }
+
+    #[test]
+    fn engine_pause_is_cancellable() {
+        assert_eq!(status_after_engine_pause(true), TaskStatus::Paused);
+        assert_eq!(status_after_engine_pause(false), TaskStatus::Queued);
     }
 }

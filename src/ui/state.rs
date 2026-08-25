@@ -113,13 +113,33 @@ impl RuntimeMap {
 
     pub fn pause(&self, id: &str) {
         if let Some(s) = self.inner.get(id) {
-            s.ctrl.pause.store(true, std::sync::atomic::Ordering::Relaxed);
+            s.ctrl
+                .pause
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn pause_all(&self) {
+        for s in self.inner.values() {
+            s.ctrl
+                .pause
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn resume_all(&self) {
+        for s in self.inner.values() {
+            s.ctrl
+                .pause
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     pub fn stop(&self, id: &str) {
         if let Some(s) = self.inner.get(id) {
-            s.ctrl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            s.ctrl
+                .stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -170,5 +190,33 @@ impl RuntimeMap {
             }
         }
         dirty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::progress::{Control, LiveMeta, LiveProgress};
+
+    fn slot() -> RuntimeSlot {
+        RuntimeSlot {
+            ctrl: Control::new(),
+            progress: LiveProgress::new(0, 0),
+            meta: LiveMeta::new(),
+            task: None,
+        }
+    }
+
+    #[test]
+    fn resume_all_clears_in_flight_pause_flags() {
+        let mut map = RuntimeMap::default();
+        map.insert("a".into(), slot());
+        map.insert("b".into(), slot());
+        map.pause_all();
+        assert!(map.get("a").unwrap().ctrl.is_pause());
+        assert!(map.get("b").unwrap().ctrl.is_pause());
+        map.resume_all();
+        assert!(!map.get("a").unwrap().ctrl.is_pause());
+        assert!(!map.get("b").unwrap().ctrl.is_pause());
     }
 }

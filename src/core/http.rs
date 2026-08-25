@@ -62,10 +62,7 @@ fn default_headers(ua: &str) -> HeaderMap {
     if let Ok(v) = HeaderValue::from_str(ua) {
         h.insert(reqwest::header::USER_AGENT, v);
     }
-    h.insert(
-        reqwest::header::ACCEPT,
-        HeaderValue::from_static("*/*"),
-    );
+    h.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
     h.insert(
         reqwest::header::ACCEPT_ENCODING,
         HeaderValue::from_static("identity"),
@@ -273,7 +270,9 @@ fn split_ranges(size: u64, n: u32) -> Vec<(u64, u64)> {
     let mut start = 0u64;
     for i in 0..n {
         let extra = if i == n - 1 { size - chunk * n } else { 0 };
-        let end = (start + chunk + extra).saturating_sub(1).min(size.saturating_sub(1));
+        let end = (start + chunk + extra)
+            .saturating_sub(1)
+            .min(size.saturating_sub(1));
         if start <= end {
             out.push((start, end));
         }
@@ -297,10 +296,7 @@ fn retarget_dest(
     meta: std::path::PathBuf,
     clean: &str,
 ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let current = dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let current = dest.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if clean.is_empty() || clean == current {
         return (dest, part, meta);
     }
@@ -390,7 +386,9 @@ fn part_len(start: u64, end: u64) -> u64 {
 
 fn unread(part: &LivePart) -> u64 {
     let end = part.end.load(Ordering::Acquire);
-    let pos = part.start.saturating_add(part.written.load(Ordering::Acquire));
+    let pos = part
+        .start
+        .saturating_add(part.written.load(Ordering::Acquire));
     if pos > end {
         0
     } else {
@@ -430,7 +428,9 @@ fn steal_from(pool: &mut Vec<Arc<LivePart>>) -> Option<Arc<LivePart>> {
     let i = best?;
     let victim = pool[i].clone();
     let end = victim.end.load(Ordering::Acquire);
-    let pos = victim.start.saturating_add(victim.written.load(Ordering::Acquire));
+    let pos = victim
+        .start
+        .saturating_add(victim.written.load(Ordering::Acquire));
     if pos > end {
         return None;
     }
@@ -484,11 +484,7 @@ fn take_work(pool: &Mutex<Vec<Arc<LivePart>>>) -> Option<Arc<LivePart>> {
 
 fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutcome {
     let n = suggested_connections(info.size, job.connections);
-    let dest_name = job
-        .dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let dest_name = job.dest.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let parts: Vec<PartMeta> = if let Some(old) = load_resume(
         job.meta_path,
         job.part,
@@ -510,9 +506,7 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
     };
 
     let already: u64 = parts.iter().map(|p| p.done).sum();
-    job.progress
-        .downloaded
-        .store(already, Ordering::Relaxed);
+    job.progress.downloaded.store(already, Ordering::Relaxed);
     job.progress.last_bytes.store(already, Ordering::Relaxed);
 
     let file = match open_part(job.part) {
@@ -522,10 +516,7 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
     preallocate(&file, info.size);
     drop(file);
 
-    if parts
-        .iter()
-        .all(|p| p.done >= part_len(p.start, p.end))
-    {
+    if parts.iter().all(|p| p.done >= part_len(p.start, p.end)) {
         return finish_ok(job, info.size);
     }
 
@@ -683,23 +674,16 @@ fn download_part(
         if ctrl.interrupted() {
             return;
         }
-        let pos = part.start.saturating_add(part.written.load(Ordering::Acquire));
+        let pos = part
+            .start
+            .saturating_add(part.written.load(Ordering::Acquire));
         let end = part.end.load(Ordering::Acquire);
         if pos > end {
             return;
         }
         let window_end = pos.saturating_add(HTTP_WINDOW.saturating_sub(1)).min(end);
         match fetch_range(
-            client,
-            url,
-            part_path,
-            pos,
-            window_end,
-            part,
-            referer,
-            cookies,
-            progress,
-            ctrl,
+            client, url, part_path, pos, window_end, part, referer, cookies, progress, ctrl,
         ) {
             Ok(()) => {
                 attempt = 0;
@@ -792,13 +776,19 @@ fn fetch_range(
 }
 
 fn single_stream(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutcome {
-    let resume_from = job.part.exists().then(|| {
-        std::fs::metadata(job.part).map(|m| m.len()).unwrap_or(0)
-    }).unwrap_or(0);
+    let resume_from = job
+        .part
+        .exists()
+        .then(|| std::fs::metadata(job.part).map(|m| m.len()).unwrap_or(0))
+        .unwrap_or(0);
 
     if resume_from > 0 {
-        job.progress.downloaded.store(resume_from, Ordering::Relaxed);
-        job.progress.last_bytes.store(resume_from, Ordering::Relaxed);
+        job.progress
+            .downloaded
+            .store(resume_from, Ordering::Relaxed);
+        job.progress
+            .last_bytes
+            .store(resume_from, Ordering::Relaxed);
     }
 
     let mut req = client.get(job.url).header("Accept-Encoding", "identity");
@@ -857,11 +847,7 @@ fn single_stream(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOu
 }
 
 fn finish_ok(job: &HttpJob<'_>, size: u64) -> JobOutcome {
-    let name = job
-        .dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let name = job.dest.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if let Err(e) = crate::core::verify::verify_finished(job.part, size, name) {
         crate::core::log::write(format_args!("成品校验失败：{e}"));
         return JobOutcome::Failed(e);

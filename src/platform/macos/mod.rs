@@ -20,7 +20,10 @@ pub fn reveal_in_explorer(path: &Path) {
         }
         return;
     }
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
 }
 
 pub fn open_in_default_app(path: &Path) {

@@ -68,7 +68,8 @@ fn connect(t: &FtpTarget) -> Result<FtpStream, String> {
     let addr = format!("{}:{}", t.host, t.port);
     let mut ftp = FtpStream::connect(&addr).map_err(|e| e.to_string())?;
     ftp.login(&t.user, &t.pass).map_err(|e| e.to_string())?;
-    ftp.transfer_type(FileType::Binary).map_err(|e| e.to_string())?;
+    ftp.transfer_type(FileType::Binary)
+        .map_err(|e| e.to_string())?;
     Ok(ftp)
 }
 
@@ -98,8 +99,12 @@ pub fn download_ftp(job: FtpJob<'_>) -> JobOutcome {
         0
     };
     if resume_from > 0 {
-        job.progress.downloaded.store(resume_from, Ordering::Relaxed);
-        job.progress.last_bytes.store(resume_from, Ordering::Relaxed);
+        job.progress
+            .downloaded
+            .store(resume_from, Ordering::Relaxed);
+        job.progress
+            .last_bytes
+            .store(resume_from, Ordering::Relaxed);
         if ftp.resume_transfer(resume_from as usize).is_err() {
             let _ = std::fs::remove_file(job.part);
             job.progress.downloaded.store(0, Ordering::Relaxed);
@@ -122,9 +127,7 @@ pub fn download_ftp(job: FtpJob<'_>) -> JobOutcome {
             if job.ctrl.interrupted() {
                 break;
             }
-            let n = reader
-                .read(&mut buf)
-                .map_err(FtpError::ConnectionError)?;
+            let n = reader.read(&mut buf).map_err(FtpError::ConnectionError)?;
             if n == 0 {
                 break;
             }

@@ -377,7 +377,11 @@ async fn download_bt_async(
                 return None;
             }
             Some(TaskFile {
-                path: fd.filename.to_pathbuf().to_string_lossy().replace('\\', "/"),
+                path: fd
+                    .filename
+                    .to_pathbuf()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
                 size: fd.len,
                 downloaded: 0,
             })

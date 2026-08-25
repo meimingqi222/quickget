@@ -114,7 +114,8 @@ mod http_live_tests {
                         let req_s = String::from_utf8_lossy(&req);
                         let range = req_s.lines().find_map(|l| {
                             let l = l.to_ascii_lowercase();
-                            l.strip_prefix("range: bytes=").map(|s| s.trim().to_string())
+                            l.strip_prefix("range: bytes=")
+                                .map(|s| s.trim().to_string())
                         });
                         let (status, slice, cr) = if let Some(r) = range {
                             let r = r.trim_end_matches('\r').to_string();

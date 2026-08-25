@@ -31,7 +31,10 @@ pub fn write_at(file: &mut File, offset: u64, buf: &[u8]) -> io::Result<()> {
         while wrote < buf.len() {
             let n = file.write_at(&buf[wrote..], offset + wrote as u64)?;
             if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "write_at 写了 0 字节"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write_at 写了 0 字节",
+                ));
             }
             wrote += n;
         }
@@ -44,7 +47,10 @@ pub fn write_at(file: &mut File, offset: u64, buf: &[u8]) -> io::Result<()> {
         while wrote < buf.len() {
             let n = file.seek_write(&buf[wrote..], offset + wrote as u64)?;
             if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "seek_write 写了 0 字节"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "seek_write 写了 0 字节",
+                ));
             }
             wrote += n;
         }

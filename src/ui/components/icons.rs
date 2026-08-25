@@ -23,7 +23,13 @@ pub fn icon_list(fg: u32, size: f32) -> AnyElement {
         .justify_center()
         .gap(px(3.))
         .child(div().w(px(w)).h(px(2.)).rounded_full().bg(rgb(fg)))
-        .child(div().w(px(w * 0.75)).h(px(2.)).rounded_full().bg(rgba(fg, 0.7)))
+        .child(
+            div()
+                .w(px(w * 0.75))
+                .h(px(2.))
+                .rounded_full()
+                .bg(rgba(fg, 0.7)),
+        )
         .child(div().w(px(w * 0.9)).h(px(2.)).rounded_full().bg(rgb(fg)))
         .into_any_element()
 }
@@ -37,7 +43,13 @@ pub fn icon_bolt(fg: u32, size: f32) -> AnyElement {
         .items_center()
         .justify_center()
         .gap(px(2.))
-        .child(div().w(px(2.5)).h(px(size * 0.38)).rounded_full().bg(rgb(fg)))
+        .child(
+            div()
+                .w(px(2.5))
+                .h(px(size * 0.38))
+                .rounded_full()
+                .bg(rgb(fg)),
+        )
         .child(
             div()
                 .w(px(size * 0.55))

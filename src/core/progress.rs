@@ -92,11 +92,7 @@ impl LiveProgress {
         };
         // 轻微平滑，避免进度条上的速度数字乱跳。
         let prev = self.speed_bps.load(Ordering::Relaxed);
-        let smoothed = if prev == 0 {
-            bps
-        } else {
-            (prev * 3 + bps) / 4
-        };
+        let smoothed = if prev == 0 { bps } else { (prev * 3 + bps) / 4 };
         self.speed_bps.store(smoothed, Ordering::Relaxed);
         smoothed
     }
