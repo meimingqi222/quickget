@@ -35,10 +35,14 @@ fn main() {
     }
 
     if quickget::core::capture::gui_alive() {
+        eprintln!("QuickGet 已在运行，请求前置已有窗口。");
+        eprintln!("若确认没有任何窗口在跑，删除配置目录里的 gui.pid 后重试。");
         quickget::core::capture::request_raise();
         return;
     }
     let Some(_gui_lock) = quickget::core::capture::try_acquire_gui_lock() else {
+        eprintln!("另一个 QuickGet 实例正持有单实例锁。");
+        eprintln!("若确认没有窗口在跑，删除配置目录里的 gui.lock 后重试。");
         quickget::core::capture::request_raise();
         return;
     };
@@ -165,6 +169,9 @@ fn cli_main(args: &[String]) {
             } else {
                 None
             },
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: Default::default(),
         };
         let progress = LiveProgress::new(0, 0);

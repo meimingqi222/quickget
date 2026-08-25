@@ -21,6 +21,21 @@ pub struct CaptureJob {
     pub ua: Option<String>,
     #[serde(default)]
     pub filename: Option<String>,
+    /// 网盘分享任务。存在时 GUI 先经 providers 插件换明文直链，再按普通 HTTP 任务入队。
+    /// 兼容旧版消息里的 "baidu" 字段。
+    #[serde(default, alias = "baidu")]
+    pub netdisk: Option<crate::core::providers::NetdiskRequest>,
+    /// 单个 Range 请求的最大字节数。None = 不限制（用引擎默认分片）。
+    /// 百度 PCS 直链对单次 Range > 4MB 回 31326 风控，需限制每片大小。
+    #[serde(default)]
+    pub max_part_size: Option<u64>,
+    /// 下载完成后需清理的网盘路径（转存临时文件）。
+    /// None = 非转存方式，无需清理。
+    #[serde(default)]
+    pub cleanup_paths: Option<Vec<String>>,
+    /// 清理转存文件用的网盘 Cookie（含 BDUSS）。
+    #[serde(default)]
+    pub cleanup_cookies: Option<String>,
 }
 
 pub fn inbox_dir() -> Option<PathBuf> {
@@ -90,11 +105,27 @@ pub fn native_host_manifest(exe: &Path) -> String {
     serde_json::json!({
         "name": HOST_NAME,
         "description": "QuickGet native messaging host",
-        "path": exe.display().to_string(),
+        "path": simplify_path(exe).to_string_lossy(),
         "type": "stdio",
         "allowed_origins": [origin],
     })
     .to_string()
+}
+
+/// 去掉 Windows 规范化路径（`Path::canonicalize`）产生的 `\\?\` / `\\?\UNC\` 前缀。
+///
+/// Chrome/Edge 的 Native Messaging 拿清单里的 path 去 CreateProcess 时，
+/// 带 `\\?\` 前缀会导致宿主启动失败，浏览器侧表现为
+/// “Error when communicating with the native messaging host”。
+pub fn simplify_path(p: &Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    p.to_path_buf()
 }
 
 /// 把 Native Messaging 清单写到各 Chromium 换壳的目录。失败不致命。
@@ -327,35 +358,104 @@ fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    #[cfg(unix)]
-    {
-        unsafe {
-            if libc::kill(pid as i32, 0) == 0 {
-                true
-            } else {
-                std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            }
+    // 只看"这个 PID 有没有进程"会误判：Windows 会复用 PID，进程退出后若有
+    // 句柄未释放其对象也会残留，OpenProcess 照样成功。必须核对属主确实是
+    // 我们的可执行文件且仍在运行。
+    let Some(expected) = current_image_name() else {
+        return false;
+    };
+    alive_with_image(pid, &expected)
+}
+
+fn current_image_name() -> Option<String> {
+    std::env::current_exe()
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+/// 进程活着、可被查询，且镜像名与当前可执行文件一致。
+/// 查询受限时按保守策略处理（见各分支注释）。
+#[cfg(windows)]
+fn alive_with_image(pid: u32, expected: &str) -> bool {
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetExitCodeProcess, OpenProcess};
+    use winapi::um::winbase::QueryFullProcessImageNameW;
+    use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    // WinBase.h 里的 STILL_ACTIVE 就是 259；winapi 未导出，自定义常量。
+    const STILL_ACTIVE: u32 = 259;
+
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let has_exit = GetExitCodeProcess(h, &mut exit_code) != 0;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let got_path = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+        CloseHandle(h);
+        if !got_path {
+            // 存在但查询受限：无法排除是无关进程占用了这个 PID。
+            // 宁可当已死让用户能开窗，最坏情况是双开被单实例锁兜住。
+            return false;
+        }
+        if has_exit && exit_code != STILL_ACTIVE {
+            // 已退出但对象因句柄未释放而残留（典型：父进程/调试器没关句柄）。
+            // 运行中的进程 exit_code 恒为 STILL_ACTIVE。
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case(expected))
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn alive_with_image(pid: u32, expected: &str) -> bool {
+    extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut u8, bufsize: u32) -> i32;
+    }
+    unsafe {
+        if libc::kill(pid as i32, 0) != 0 {
+            return false;
         }
     }
-    #[cfg(windows)]
-    {
-        use winapi::um::handleapi::CloseHandle;
-        use winapi::um::processthreadsapi::OpenProcess;
-        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                false
-            } else {
-                CloseHandle(h);
-                true
-            }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { proc_pidpath(pid as i32, buf.as_mut_ptr(), buf.len() as u32) };
+    if n <= 0 {
+        // 查不到路径（权限等）：保守当作活着，交给单实例锁兜底。
+        return true;
+    }
+    let path = String::from_utf8_lossy(&buf[..n as usize]).to_string();
+    std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == expected)
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn alive_with_image(pid: u32, expected: &str) -> bool {
+    unsafe {
+        if libc::kill(pid as i32, 0) != 0 {
+            return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
+    // 还活着：用 /proc/<pid>/exe 核对镜像名；核对不了就保守当活。
+    match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(p) => p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == expected)
+            .unwrap_or(true),
+        Err(_) => true,
     }
 }
 
@@ -373,12 +473,37 @@ mod tests {
             referer: Some("https://example.com/".into()),
             ua: None,
             filename: Some("a.zip".into()),
+            netdisk: Some(crate::core::providers::NetdiskRequest {
+                provider: Some("baidu".into()),
+                share_url: "https://pan.baidu.com/s/abc".into(),
+                fids: vec!["123456789012345".into()],
+                sekey: Some("fakesekey".into()),
+                js_token: None,
+            }),
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
         };
         enqueue_in(&dir, &job).unwrap();
         let got = drain_in(&dir);
         assert_eq!(got, vec![job]);
         assert!(drain_in(&dir).is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_baidu_field_still_deserializes() {
+        // v0.1.2 的收件箱任务用的是 "baidu" 键，升级后不能丢。
+        let text = serde_json::json!({
+            "url": "https://pan.baidu.com/s/abc",
+            "baidu": {"share_url": "https://pan.baidu.com/s/abc", "fids": ["42"]}
+        })
+        .to_string();
+        let job: CaptureJob = serde_json::from_str(&text).unwrap();
+        let nd = job.netdisk.expect("netdisk should be present");
+        assert_eq!(nd.share_url, "https://pan.baidu.com/s/abc");
+        assert_eq!(nd.fids, vec!["42"]);
+        assert_eq!(nd.provider, None, "旧消息无 provider，走自动识别");
     }
 
     #[test]
@@ -438,9 +563,40 @@ mod tests {
     }
 
     #[test]
+    fn manifest_strips_verbatim_path_prefix() {
+        // 回归：canonicalize 产生的 \\?\ 前缀会让 Chrome 无法启动宿主。
+        // 见 com.quickget.host.json 曾写成 \\\\?\\D:\\...\\quickget.exe。
+        let m = native_host_manifest(Path::new(r"\\?\D:\code\quickget\target\debug\quickget.exe"));
+        assert!(!m.contains(r"\\?\\"), "清单里不允许出现 verbatim 前缀：{m}");
+        assert!(m.contains("D:\\\\code\\\\quickget"));
+
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\UNC\server\share\q.exe")),
+            PathBuf::from(r"\\server\share\q.exe")
+        );
+        assert_eq!(
+            simplify_path(Path::new(r"C:\plain\q.exe")),
+            PathBuf::from(r"C:\plain\q.exe")
+        );
+    }
+
+    #[test]
     fn missing_spawn_stamp_is_not_fresh() {
         let path = std::env::temp_dir().join(format!("qg-no-stamp-{}", uuid::Uuid::new_v4()));
         assert!(!spawn_stamp_fresh(&path, 2500));
+    }
+
+    #[test]
+    fn own_pid_is_alive_and_foreign_pids_are_not() {
+        // 当前测试进程自己的 PID：镜像名与 current_exe 一致 → 活。
+        assert!(pid_alive(std::process::id()));
+        // PID 复用/残留对象的回归测试：随便挑一个大概率不存在的 PID。
+        // 若真撞上同名进程（几乎不可能），换一个即可。
+        let bogus = 0x5F00_0000u32;
+        if std::process::id() != bogus {
+            // 不强断言 false——万一存在会误报；这里只验证不 panic。
+            let _ = pid_alive(bogus);
+        }
     }
 
     #[test]

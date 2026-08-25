@@ -56,6 +56,17 @@ pub struct Task {
     /// BT 实际落盘目录。标题换成种子真名后 dest_path 仍指向这个文件夹。
     #[serde(default)]
     pub output_dir: Option<PathBuf>,
+    /// 单个 Range 请求的最大字节数。None = 按 connections 均分。
+    /// 百度 PCS 直链对单次 Range > 4MB 回 31326 风控，需限制每片大小。
+    #[serde(default)]
+    pub max_part_size: Option<u64>,
+    /// 下载完成后需清理的网盘路径（转存临时文件）。
+    /// None = 非转存方式，无需清理。
+    #[serde(default)]
+    pub cleanup_paths: Option<Vec<String>>,
+    /// 网盘 Cookie，用于下载完成后清理转存文件。
+    #[serde(default)]
+    pub cleanup_cookies: Option<String>,
     /// 当前 Peer 快照。只给界面看，不写任务文件。
     #[serde(default, skip)]
     pub peers: BtPeers,
@@ -404,6 +415,9 @@ mod tests {
             user_agent: None,
             files: Vec::new(),
             output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: BtPeers::default(),
         };
         let paths = t.leftover_paths();
@@ -439,6 +453,9 @@ mod tests {
             user_agent: None,
             files: Vec::new(),
             output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: BtPeers::default(),
         };
         let files = t.display_files();
@@ -479,6 +496,9 @@ mod tests {
                 },
             ],
             output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: BtPeers::default(),
         };
         let p = t.file_disk_path(&t.files[1]);
@@ -509,6 +529,9 @@ mod tests {
             user_agent: None,
             files,
             output_dir,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: BtPeers::default(),
         }
     }
@@ -689,6 +712,9 @@ mod tests {
             user_agent: None,
             files: Vec::new(),
             output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: BtPeers::default(),
         }
     }

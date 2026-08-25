@@ -62,6 +62,8 @@ pub struct Root {
     pending_captures: Vec<CaptureJob>,
     capture_flush_task: Option<GpuiTask<()>>,
     capture_flush_gen: u64,
+    /// 网盘直链解析中的后台任务句柄，保持存活用。
+    netdisk_tasks: Vec<GpuiTask<()>>,
 }
 
 pub enum PendingConfirm {
@@ -108,9 +110,11 @@ impl Root {
             pending_captures: Vec::new(),
             capture_flush_task: None,
             capture_flush_gen: 0,
+            netdisk_tasks: Vec::new(),
         };
         crate::core::capture::write_pid();
         crate::core::capture::install_native_host();
+        crate::core::http_api::start();
         root.start_tick(cx);
         root.start_clipboard_watch(cx);
         root.start_inbox_watch(cx);
@@ -258,6 +262,9 @@ impl Root {
                 } else {
                     None
                 },
+                max_part_size: None,
+                cleanup_paths: None,
+                cleanup_cookies: None,
                 peers: Default::default(),
             };
             last_name = filename;
@@ -285,6 +292,12 @@ impl Root {
     }
 
     fn ingest_capture(&mut self, job: CaptureJob, status: TaskStatus, cx: &mut Context<Self>) {
+        if let Some(nd) = job.netdisk.clone() {
+            let ua = job.ua.clone();
+            let cookies = job.cookies.unwrap_or_default();
+            self.ingest_netdisk(nd, ua, cookies, cx);
+            return;
+        }
         let url = job.url.trim().to_string();
         if url.is_empty() {
             return;
@@ -348,6 +361,9 @@ impl Root {
             } else {
                 None
             },
+            max_part_size: job.max_part_size,
+            cleanup_paths: job.cleanup_paths,
+            cleanup_cookies: job.cleanup_cookies,
             peers: Default::default(),
         };
         self.tasks.insert(0, task);
@@ -359,6 +375,101 @@ impl Root {
         self.persist();
         self.pump_queue(cx);
         raise_gui(cx);
+        cx.notify();
+    }
+
+    /// 网盘分享任务：交给 providers 注册表里对应的插件，先用页面无关的 API
+    /// 换明文直链，再把每个文件按普通 HTTP 任务入队。解析在后台线程跑。
+    fn ingest_netdisk(
+        &mut self,
+        nd: crate::core::providers::NetdiskRequest,
+        ua: Option<String>,
+        cookies: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(provider) =
+            crate::core::providers::find(nd.provider.as_deref(), &nd.share_url)
+        else {
+            self.status = bilingual(|l| tr_netdisk_unsupported(l, nd.share_url.trim()));
+            cx.notify();
+            return;
+        };
+        self.status = bilingual(|l| tr_netdisk_resolving(l, provider.display_name()));
+        cx.notify();
+        let ua = ua.unwrap_or_else(|| self.settings.user_agent.clone());
+        let api_ua = ua.clone();
+        let share_referer = nd.share_url.clone();
+        let netdisk_cookies = cookies.clone();
+        let work = cx.background_executor().spawn(async move {
+            // 先探登录档位（决定直链的服务器限速），再解析直链；失败互不阻断。
+            let account = provider.check_login(cookies.trim(), &api_ua);
+            let files = provider.resolve(&nd, cookies.trim(), &api_ua);
+            (provider, share_referer, account, files, netdisk_cookies)
+        });
+        let task_ua = ua.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let (provider, referer, account, result, netdisk_cookies) = work.await;
+            this.update(cx, move |this, cx| {
+                this.apply_netdisk_result(provider, referer, account, result, task_ua, netdisk_cookies, cx);
+            })
+            .ok();
+        });
+        self.netdisk_tasks.push(task);
+    }
+
+    fn apply_netdisk_result(
+        &mut self,
+        provider: &'static dyn crate::core::providers::ShareProvider,
+        referer: String,
+        account: Result<crate::core::providers::AccountInfo, String>,
+        result: Result<Vec<crate::core::providers::ResolvedFile>, String>,
+        ua: String,
+        netdisk_cookies: String,
+        cx: &mut Context<Self>,
+    ) {
+        // 登录档位决定 dlink 的服务端限速：顶级会员满速、游客严格限速。
+        let account = account.unwrap_or_default();
+        match result {
+            Err(e) => {
+                let name = provider.display_name();
+                self.status = bilingual(|l| tr_netdisk_fail(l, name, &e));
+            }
+            Ok(files) if files.is_empty() => {
+                let name = provider.display_name();
+                self.status =
+                    bilingual(|l| tr_netdisk_fail(l, name, "分享里没有可下载的文件"));
+            }
+            Ok(files) => {
+                // 直链任务默认不带网盘 Cookie：签名已含账号权益，
+                // 登录凭证留在网盘域内，不流向 CDN。
+                let count = files.len();
+                let file_ua = provider
+                    .download_ua()
+                    .map(|s| s.to_string())
+                    .unwrap_or(ua);
+                let max_part = provider.max_part_size();
+                for f in files {
+                    // 收集转存路径用于下载后清理（仅百度转存方式有 transfer_path）。
+                    let cleanup = f.transfer_path.as_ref().map(|p| vec![p.clone()]);
+                    let cleanup_ck = cleanup.as_ref().map(|_| netdisk_cookies.clone());
+                    self.add_capture(
+                        CaptureJob {
+                            url: f.dlink,
+                            referer: Some(referer.clone()),
+                            ua: Some(file_ua.clone()),
+                            filename: Some(f.filename),
+                            max_part_size: max_part,
+                            cleanup_paths: cleanup,
+                            cleanup_cookies: cleanup_ck,
+                            ..CaptureJob::default()
+                        },
+                        cx,
+                    );
+                }
+                let name = provider.display_name();
+                self.status = bilingual(|l| tr_netdisk_added(l, name, count, account.clone()));
+            }
+        }
         cx.notify();
     }
 
@@ -497,7 +608,7 @@ impl Root {
         let gpui_task = cx.spawn(async move |this, cx| {
             let outcome = work.await;
             this.update(cx, |this, cx| {
-                this.apply_outcome(&id_owned, outcome);
+                this.apply_outcome(&id_owned, outcome, cx);
                 this.runtime.remove(&id_owned);
                 this.persist();
                 this.pump_queue(cx);
@@ -517,7 +628,7 @@ impl Root {
         self.persist();
     }
 
-    fn apply_outcome(&mut self, id: &str, outcome: JobOutcome) {
+    fn apply_outcome(&mut self, id: &str, outcome: JobOutcome, cx: &mut Context<Self>) {
         let snap = self
             .runtime
             .get(id)
@@ -565,6 +676,16 @@ impl Root {
                 t.peers = Default::default();
                 let name = t.filename.clone();
                 self.status = bilingual(|l| tr_status_done(l, &name));
+                // 下载成功后清理网盘转存的临时文件（尽力而为，不阻断）。
+                if let (Some(paths), Some(ck)) = (t.cleanup_paths.take(), t.cleanup_cookies.take()) {
+                    if !paths.is_empty() {
+                        cx.background_executor()
+                            .spawn(async move {
+                                crate::core::providers::baidu::delete_files(&ck, &paths);
+                            })
+                            .detach();
+                    }
+                }
             }
             JobOutcome::Paused { downloaded, size } => {
                 t.downloaded = downloaded;

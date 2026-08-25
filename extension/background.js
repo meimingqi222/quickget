@@ -161,8 +161,7 @@ async function stealAndSend(item) {
   return { ok: true, filename };
 }
 
-async function sendJob(partial, tab, cookieUrl, notify) {
-  const url = partial.url;
+async function sendJob(partial, tab, cookieUrl, notify) {  const url = partial.url;
   if (!url || url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("chrome")) {
     return { ok: false, error: "unsupported url" };
   }
@@ -180,6 +179,42 @@ async function sendJob(partial, tab, cookieUrl, notify) {
     reportCapture(result, payload.filename || filenameFromUrl(url));
   }
   return result;
+}
+
+// 网盘分享页入口：只传分享链接，直链解析由 QuickGet 主程序的 providers 插件完成。
+// Cookie 在这里附上（登录态、提取码凭证），但只用于网盘域内的解析 API。
+// 新增支持一家网盘：往 NETDISK_HOSTS 加主机名 + manifest 的 content_scripts。
+const NETDISK_HOSTS = ["pan.baidu.com"];
+
+function isNetdiskShareUrl(url) {
+  try {
+    const u = new URL(url);
+    return NETDISK_HOSTS.includes(u.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function sendNetdiskShare(shareUrl, jsToken) {
+  if (!isNetdiskShareUrl(shareUrl)) {
+    return { ok: false, error: "不是支持的网盘分享链接" };
+  }
+  const cookies = await cookieHeader("https://" + new URL(shareUrl).hostname + "/");
+  const netdisk = { share_url: shareUrl };
+  if (jsToken) netdisk.js_token = jsToken;
+  const payload = {
+    url: shareUrl,
+    referer: shareUrl,
+    ua: navigator.userAgent,
+    filename: "",
+    cookies,
+    netdisk
+  };
+  const result = await nativeSend(payload);
+  if (result && result.ok) {
+    flashBadge(true);
+  }
+  return result || { ok: false, error: "QuickGet 未运行，请先打开应用" };
 }
 
 function reportCapture(result, filename) {
@@ -218,7 +253,31 @@ function flashBadge(ok) {
   } catch (_) {}
 }
 
+// 本地 HTTP 通道：QuickGet GUI 运行时监听。优先走这里——
+// 部分机器上 Chrome/Edge 的原生消息通道会被安全策略卡住（表现为永远超时），
+// HTTP 完全绕开那套注册表 + 宿主进程机制。
+const HTTP_ENDPOINT = "http://127.0.0.1:18666";
+
 function nativeSend(payload) {
+  return httpSend(payload).then((r) => r || nativeSendViaHost(payload));
+}
+
+async function httpSend(payload) {
+  try {
+    const resp = await fetch(HTTP_ENDPOINT + "/job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (_) {
+    // GUI 没在跑：静默回退到 Native Messaging（它能顺便把 GUI 拉起来）。
+    return null;
+  }
+}
+
+function nativeSendViaHost(payload) {
   return new Promise((resolve) => {
     chrome.runtime.sendNativeMessage(HOST, payload, (resp) => {
       if (chrome.runtime.lastError) {
@@ -355,6 +414,11 @@ function bindBrowser() {
         const result = await sendJob({ url: tab.url, referer: tab.url }, tab);
         sendResponse(result);
       });
+      return true;
+    }
+    // v0.1.2 用的是 quickget-baidu，保留兼容一个版本周期。
+    if (msg && (msg.type === "quickget-netdisk" || msg.type === "quickget-baidu")) {
+      sendNetdiskShare(String(msg.shareUrl || ""), String(msg.jsToken || "")).then(sendResponse);
       return true;
     }
     if (msg && msg.type === "open-app") {

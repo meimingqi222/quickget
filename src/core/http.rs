@@ -88,6 +88,10 @@ pub struct HttpJob<'a> {
     pub cookies: Option<&'a str>,
     pub progress: Arc<LiveProgress>,
     pub ctrl: Control,
+    /// 单个 Range 请求的最大字节数。None = 按 connections 均分。
+    /// 百度 PCS 直链对单次 Range > 4MB 回 31326 风控，必须限制每片大小。
+    /// 分片数可能超过 connections（线程数），worker 完成自己的片后从池里取新片。
+    pub max_part_size: Option<u64>,
 }
 
 pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
@@ -125,6 +129,7 @@ pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
         cookies: job.cookies,
         progress: job.progress.clone(),
         ctrl: job.ctrl.clone(),
+        max_part_size: job.max_part_size,
     };
     job.progress.set_total(info.size);
 
@@ -276,6 +281,22 @@ fn split_ranges(size: u64, n: u32) -> Vec<(u64, u64)> {
         if start <= end {
             out.push((start, end));
         }
+        start = end + 1;
+    }
+    out
+}
+
+/// 按 `max_part_size` 上限切分。每片不超过 cap，最后一片可能更小。
+/// 用于百度 PCS 等对单次 Range 大小有风控的源。
+fn split_ranges_capped(size: u64, cap: u64) -> Vec<(u64, u64)> {
+    if size == 0 || cap == 0 {
+        return split_ranges(size, 1);
+    }
+    let mut out = Vec::new();
+    let mut start = 0u64;
+    while start < size {
+        let end = (start + cap).min(size) - 1;
+        out.push((start, end));
         start = end + 1;
     }
     out
@@ -495,7 +516,13 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
     ) {
         old.parts
     } else {
-        split_ranges(info.size, n)
+        // 有 max_part_size 时按上限切分（分片数可能 > 线程数，worker 完成后从池取新片）；
+        // 否则按连接数均分。
+        let ranges = match job.max_part_size {
+            Some(cap) if cap > 0 => split_ranges_capped(info.size, cap),
+            _ => split_ranges(info.size, n),
+        };
+        ranges
             .into_iter()
             .map(|(start, end)| PartMeta {
                 start,
@@ -889,6 +916,23 @@ mod tests {
         assert_eq!(parts.len(), 10);
         assert_eq!(parts[0], (0, 0));
         assert_eq!(parts[9], (9, 9));
+    }
+
+    #[test]
+    fn split_capped_keeps_parts_under_limit() {
+        // 10MB / 4MB cap = 3 parts (4MB, 4MB, 2MB)
+        let parts = split_ranges_capped(10 * 1024 * 1024, 4 * 1024 * 1024);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], (0, 4 * 1024 * 1024 - 1));
+        assert_eq!(parts[1], (4 * 1024 * 1024, 8 * 1024 * 1024 - 1));
+        assert_eq!(parts[2], (8 * 1024 * 1024, 10 * 1024 * 1024 - 1));
+        // 每片不超过 cap
+        for (s, e) in &parts {
+            assert!(*e - *s + 1 <= 4 * 1024 * 1024, "part too large");
+        }
+        // 覆盖完整
+        assert_eq!(parts.first().unwrap().0, 0);
+        assert_eq!(parts.last().unwrap().1, 10 * 1024 * 1024 - 1);
     }
 
     fn live(start: u64, end: u64, written: u64) -> Arc<LivePart> {

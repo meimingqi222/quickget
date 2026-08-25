@@ -11,6 +11,13 @@ pub fn is_native_host_invocation(args: &[String]) -> bool {
 
 pub fn run() {
     set_stdio_binary();
+    // 看门狗：浏览器侧协议卡住时（实测 Edge 拉起宿主后从不完成握手），
+    // 宿主会永远阻塞在 read_msg 上，每点一次下载就攒一个僵尸进程。
+    // 一次性消息正常 1 秒内完成，60 秒兜底退出足够宽裕。
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::process::exit(0);
+    });
     while let Some(msg) = read_msg() {
         let reply = handle(msg);
         if !write_msg(&reply) {

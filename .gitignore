@@ -23,6 +23,7 @@ htmlcov/
 *.tmp
 *.bak
 *.log
+tools/captures/
 *.part
 *.qg.json
 *.sqlite
@@ -36,6 +37,9 @@ htmlcov/
 *.secret
 secrets.toml
 config.local.toml
+
+# 逆向模块（版权敏感，不入公开仓库）
+src/core/providers/baidu_reverse.rs
 
 # 操作系统自动生成文件
 Thumbs.db
@@ -72,3 +76,4 @@ $RECYCLE.BIN/
 *.mobileprovision
 
 .apodex
+temp

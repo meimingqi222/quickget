@@ -348,6 +348,71 @@ pub fn tr_status_fail(lang: Language, msg: &str) -> String {
         Language::En => format!("Failed: {msg}"),
     }
 }
+pub fn tr_netdisk_resolving(lang: Language, name: &str) -> String {
+    match lang {
+        Language::Zh => format!("正在解析{name}直链…"),
+        Language::En => format!("Resolving {name} direct links…"),
+    }
+}
+pub fn tr_netdisk_added(
+    lang: Language,
+    name: &str,
+    count: usize,
+    account: crate::core::providers::AccountInfo,
+) -> String {
+    use crate::core::providers::Speed;
+    let who: Option<String> = if !account.logged_in {
+        None
+    } else {
+        match account.speed {
+            Speed::Full => Some(match lang {
+                Language::Zh => format!("{}满速", account.label.as_deref().unwrap_or("会员")),
+                Language::En => format!("{} full speed", account.label.as_deref().unwrap_or("member")),
+            }),
+            Speed::Boosted => Some(match lang {
+                Language::Zh => account.label.clone().unwrap_or_else(|| "会员".into()),
+                Language::En => account.label.unwrap_or_else(|| "member".into()),
+            }),
+            _ => None,
+        }
+    };
+    let tail = |l: Language| match l {
+        Language::Zh => format!("已加入 {count} 个文件"),
+        Language::En => format!("queued {count} file(s)"),
+    };
+    match who {
+        Some(w) => match lang {
+            Language::Zh => format!("{name}：以{w}身份加速，{}", tail(lang)),
+            Language::En => format!("{name}: accelerated as {w}, {}", tail(lang)),
+        },
+        None if !account.logged_in && account.speed == Speed::Throttled => match lang {
+            Language::Zh => format!(
+                "{name}：游客身份（限速）。在浏览器登录后可提速，{}",
+                tail(lang)
+            ),
+            Language::En => format!(
+                "{name}: guest (throttled). Log in via the browser to speed up; {}",
+                tail(lang)
+            ),
+        },
+        None => match lang {
+            Language::Zh => format!("{name}：{}", tail(lang)),
+            Language::En => format!("{name}: {}", tail(lang)),
+        },
+    }
+}
+pub fn tr_netdisk_unsupported(lang: Language, name: &str) -> String {
+    match lang {
+        Language::Zh => format!("暂不支持该网盘链接（{name}）。"),
+        Language::En => format!("Unsupported netdisk link ({name})."),
+    }
+}
+pub fn tr_netdisk_fail(lang: Language, name: &str, msg: &str) -> String {
+    match lang {
+        Language::Zh => format!("{name}解析失败：{msg}"),
+        Language::En => format!("{name} resolve failed: {msg}"),
+    }
+}
 pub fn tr_status_paused(lang: Language, name: &str) -> String {
     match lang {
         Language::Zh => format!("已暂停：{name}"),

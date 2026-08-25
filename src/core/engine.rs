@@ -69,6 +69,7 @@ pub fn run_task(
             cookies: task.cookies.as_deref(),
             progress,
             ctrl,
+            max_part_size: task.max_part_size,
         }),
     }
 }
@@ -197,6 +198,9 @@ mod http_live_tests {
             user_agent: None,
             files: Vec::new(),
             output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
             peers: Default::default(),
         };
         let progress = LiveProgress::new(0, expected.len() as u64);

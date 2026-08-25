@@ -23,6 +23,17 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 rfd = "0.15"
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# 启用百度网盘 sharedownload 逆向解析（DES-ECB 解密加密 list）。
+# 该 feature 对应的 baidu_reverse.rs 不入公开仓库（见 .gitignore）。
+# 未启用时回退到转存+PCS download 方案。
+default = []
+baidu-reverse = ["dep:des"]
+
+[dependencies.des]
+version = "0.9"
+optional = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
@@ -33,7 +44,7 @@ libc = "0.2"
 objc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["wincon", "winnls", "winuser", "shellapi", "processthreadsapi", "handleapi", "winnt", "winreg", "fileapi", "minwinbase"] }
+winapi = { version = "0.3", features = ["wincon", "winnls", "winuser", "shellapi", "processthreadsapi", "handleapi", "winnt", "winreg", "fileapi", "minwinbase", "winbase"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
