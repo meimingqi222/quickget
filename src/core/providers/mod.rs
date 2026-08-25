@@ -10,7 +10,10 @@
 //! 扩展侧再往 manifest 的 content_scripts 与 background 的域名白名单加个主机名。
 
 pub mod baidu;
+// 逆向模块从私有 submodule 引入（vendor/private-src/providers/baidu_reverse.rs）。
+// submodule 未拉取时此文件不存在，cfg 跳过编译，回退到转存方案。
 #[cfg(feature = "baidu-reverse")]
+#[path = "../../../vendor/private-src/providers/baidu_reverse.rs"]
 pub mod baidu_reverse;
 
 use serde::{Deserialize, Serialize};

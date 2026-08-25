@@ -25,8 +25,9 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 # 启用百度网盘 sharedownload 逆向解析（DES-ECB 解密加密 list）。
-# 该 feature 对应的 baidu_reverse.rs 不入公开仓库（见 .gitignore）。
-# 未启用时回退到转存+PCS download 方案。
+# 逆向代码存放在私有 submodule vendor/private-src/ 中。
+# 需先 `git clone --recursive` 拉取 submodule，再 `cargo build --features baidu-reverse`。
+# 未启用或 submodule 未拉取时回退到转存+PCS download 方案。
 default = []
 baidu-reverse = ["dep:des"]
 

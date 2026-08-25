@@ -38,9 +38,6 @@ tools/captures/
 secrets.toml
 config.local.toml
 
-# 逆向模块（版权敏感，不入公开仓库）
-src/core/providers/baidu_reverse.rs
-
 # 操作系统自动生成文件
 Thumbs.db
 [Dd]esktop.ini

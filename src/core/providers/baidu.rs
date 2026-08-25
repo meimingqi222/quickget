@@ -15,12 +15,12 @@
 //!      + BDUSS Cookie + 安卓 UA → 302 到 `*.baidupcs.com/file/…?bkt=…` 真实直链。
 //!   5. 真实直链交给 HTTP 引擎，用 [`DOWNLOAD_UA`]（安卓客户端 UA）下载，不带 Cookie。
 //!
-//! ## 逆向增强（可选，不入 Git）
+//! ## 逆向增强（可选，私有 submodule）
 //!
 //! 启用 Cargo feature `baidu-reverse` 后，第 3 步改用 `encrypt=1` 请求，
 //! 服务端返回加密 list，由 `baidu_reverse` 模块在本地 DES-ECB 解密后直接获取
-//! dlink，无需转存。该模块包含逆向百度官方客户端获得的算法，出于版权考虑
-//! 不纳入公开仓库（`baidu_reverse.rs` 已加入 `.gitignore`）。
+//! dlink，无需转存。该模块包含逆向百度官方客户端获得的算法，存放在私有
+//! submodule `vendor/private-src/` 中，不纳入公开仓库。
 //!
 //! 隐私与加速：真实直链的 bkt 签名已含账号权益（SVIP 满速等），下载不再带
 //! Cookie，避免 BDUSS 流向 CDN 域。BDUSS 只用于上面 2、3、4 步网盘/PCS 域内调用。

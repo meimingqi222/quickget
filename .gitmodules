@@ -1,0 +1,3 @@
+[submodule "vendor/private-src"]
+	path = vendor/private-src
+	url = https://github.com/meimingqi222/quickget-private-repo.git
