@@ -10,7 +10,7 @@
 //!   3. `POST /api/sharedownload?…&sign=&timestamp=`，表单
 //!      `encrypt=0&type=nolimit&product=share&timestamp=&uk=&primaryid=<share_id>&fid_list=[…]`
 //!      （带提取码的分享再带 `extra={"sekey":<BDCLND 解码>}`）。
-//!   4. 已登录时转存到网盘 `/QuickGet/.tmp/<随机id>`，再用 PCS
+//!   4. 已登录时转存到网盘 `/QuickGet/tmp/<随机id>`，再用 PCS
 //!      `GET https://pcs.baidu.com/rest/2.0/pcs/file?app_id=…&method=download&path=<网盘路径>`
 //!      + BDUSS Cookie + 安卓 UA → 302 到 `*.baidupcs.com/file/…?bkt=…` 真实直链。
 //!   5. 真实直链交给 HTTP 引擎，用 [`DOWNLOAD_UA`]（安卓客户端 UA）下载，不带 Cookie。
@@ -179,33 +179,54 @@ pub fn is_baidu_share_url(url: &str) -> bool {
 /// shorturl `AbcDefGhiJklMnoPqrStu`（去掉开头的 `1`）。id 不是 1 开头时两者相同。
 pub fn parse_surls(url: &str) -> Result<(String, String), String> {
     let u = url::Url::parse(url.trim()).map_err(|_| format!("无法解析链接：{url}"))?;
-    let id: Option<String> = if let Some(segs) = u.path_segments() {
+    // is_init: 是否来自 /share/init?surl=xxx 格式（surl 参数不带开头的 '1'）。
+    let (raw_id, is_init): (Option<String>, bool) = if let Some(segs) = u.path_segments() {
         let seg: Vec<String> = segs.filter(|s| !s.is_empty()).map(str::to_string).collect();
         match seg.as_slice() {
-            [tag, id] if tag == "s" => Some(id.clone()),
+            [tag, id] if tag == "s" => (Some(id.clone()), false),
             [second, third] if second == "share" => {
                 // /share/init?surl=xxx 或 /share/xxxx
                 if third == "init" {
                     match u.query_pairs().find(|(k, _)| k == "surl") {
-                        Some((_, v)) => Some(v.to_string()),
-                        None => None,
+                        Some((_, v)) => (Some(v.to_string()), true),
+                        None => (None, false),
                     }
                 } else {
-                    Some(third.clone())
+                    (Some(third.clone()), false)
                 }
             }
-            _ => None,
+            _ => (None, false),
         }
     } else {
-        None
+        (None, false)
     };
-    let Some(id) = id else {
+    let Some(raw_id) = raw_id else {
         return Err(format!("链接里找不到分享 id：{url}"));
     };
-    if id.len() < 6 || !id.chars().all(|c: char| c.is_ascii_alphanumeric()) {
-        return Err(format!("分享 id 形态异常：{id}"));
+    // 新版分享 id 使用 URL-safe Base64 字符集，除字母数字外合法包含 `_` 和 `-`。
+    if raw_id.len() < 6
+        || !raw_id
+            .chars()
+            .all(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(format!("分享 id 形态异常：{raw_id}"));
     }
-    let short: String = id.strip_prefix('1').unwrap_or(&id).to_string();
+    // 百度约定分享 id 以 `1` 开头，share/list 的 shorturl 参数要去掉这第一个字符：
+    // `/s/1AbcDef` → tpl `1AbcDef`，shorturl `AbcDef`。
+    // /share/init?surl=AbcDef → surl 不带 '1'，tplconfig 需要 `1AbcDef`，shorturl `AbcDef`。
+    let (id, short) = if is_init {
+        // share/init 的 surl 不带 '1' 前缀，tplconfig 需要补上。
+        let with_prefix = if raw_id.starts_with('1') {
+            raw_id.clone()
+        } else {
+            format!("1{raw_id}")
+        };
+        let short = with_prefix.strip_prefix('1').unwrap_or(&with_prefix).to_string();
+        (with_prefix, short)
+    } else {
+        let short = raw_id.strip_prefix('1').unwrap_or(&raw_id).to_string();
+        (raw_id, short)
+    };
     Ok((id, short))
 }
 
@@ -247,6 +268,31 @@ fn get_json(
         return Err(format!("百度网盘返回 HTTP {status}"));
     }
     serde_json::from_str(text.trim()).map_err(|_| "百度网盘返回了非 JSON 响应".to_string())
+}
+
+/// 同 get_json，但返回原始文本（用于诊断/回退解密）。
+fn get_json_raw(
+    client: &reqwest::blocking::Client,
+    url: String,
+    referer: &str,
+    cookies: Option<&str>,
+) -> Result<String, String> {
+    let mut req = client
+        .get(url)
+        .header("Referer", referer)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
+        .timeout(Duration::from_secs(20));
+    if let Some(c) = cookies.map(str::trim).filter(|c| !c.is_empty()) {
+        req = attach_cookies(req, c);
+    }
+    let resp = req.send().map_err(|e| format!("请求失败：{e}"))?;
+    let status = resp.status();
+    let text = resp.text().map_err(|e| format!("读取响应失败：{e}"))?;
+    if !status.is_success() {
+        return Err(format!("百度网盘返回 HTTP {status}"));
+    }
+    Ok(text)
 }
 
 fn fetch_html(
@@ -324,8 +370,82 @@ pub fn errno_of(v: &Value) -> Result<i64, String> {
         .ok_or_else(|| "百度网盘响应缺少 errno（接口可能改版）".to_string())
 }
 
+/// 从分享页 URL 的 `?pwd=` 提取提取码（明文）。
+fn pwd_from_url(url: &str) -> Option<String> {
+    url::Url::parse(url.trim()).ok()?.query_pairs()
+        .find(|(k, _)| k == "pwd")
+        .map(|(_, v)| v.to_string())
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// 对带提取码的分享执行 `POST /share/verify` 验证。验证成功会 Set-Cookie 更新
+/// BDCLND（值 = randsk，URL 编码），响应里也带 `randsk` 字段（同值）。
+/// 返回原始 randsk（URL 编码，与 Set-Cookie BDCLND 一致），供调用方：
+///   - percent_decode 后作为 sekey 参数（sharedownload/transfer）
+///   - 直接写入 cookie 的 BDCLND（保持 URL 编码，与服务器 Set-Cookie 一致）
+fn verify_share_pwd(
+    client: &reqwest::blocking::Client,
+    surl: &str,
+    pwd: &str,
+    bdstoken: Option<&str>,
+    logid: Option<&str>,
+    referer: &str,
+    cookies: &str,
+) -> Option<String> {
+    if pwd.trim().is_empty() {
+        return None;
+    }
+    let mut url = format!(
+        "{HOST}/share/verify?t={}&surl={}&channel=chunlei&web=1&app_id={}",
+        chrono::Utc::now().timestamp_millis(),
+        enc(surl),
+        APP_ID
+    );
+    if let Some(token) = bdstoken {
+        url.push_str(&format!("&bdstoken={}", enc(token)));
+    }
+    if let Some(lid) = logid {
+        url.push_str(&format!("&logid={}", enc(lid)));
+    }
+    url.push_str("&clienttype=0");
+    let body = format!("pwd={}&vcode=&vcode_str=", enc(pwd));
+    match post_form(client, url, referer, cookies, body) {
+        Ok((status, text)) if (200..300).contains(&status) => {
+            crate::core::log::write(format_args!("百度 share/verify 提交提取码成功（HTTP {status}）"));
+            // 返回原始 randsk（URL 编码），与 Set-Cookie BDCLND 的值一致。
+            // 调用方按需 percent_decode 得到 sekey 参数，或直接写入 cookie BDCLND。
+            let randsk = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("randsk").cloned())
+                .and_then(|r| r.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty());
+            if randsk.is_some() {
+                crate::core::log::write(format_args!("百度 share/verify 获取新 randsk"));
+            }
+            randsk
+        }
+        Ok((status, _)) => {
+            crate::core::log::write(format_args!("百度 share/verify HTTP {status}"));
+            None
+        }
+        Err(e) => {
+            crate::core::log::write(format_args!("百度 share/verify 请求失败：{e}"));
+            None
+        }
+    }
+}
+
 /// 取 bdstoken（CSRF）。失败不影响主流程，返回 None。
 fn fetch_bdstoken(client: &reqwest::blocking::Client, referer: &str, cookies: &str) -> Option<String> {
+    // 优先：分享页 HTML 的 yunData 里带 bdstoken（每个分享页动态生成），
+    // 即使登录接口被风控也能拿到。
+    if let Some(html) = fetch_html(client, referer, cookies) {
+        if let Some(token) = bdstoken_from_html(&html) {
+            crate::core::log::write(format_args!("百度 bdstoken 从分享页 yunData 提取成功"));
+            return Some(token);
+        }
+    }
+    // 回退：gettemplatevariable 接口（需登录态）。
     let url = format!(
         "{HOST}/api/gettemplatevariable?clienttype=0&web=1&app_id={APP_ID}&fields=%5B%22bdstoken%22%5D"
     );
@@ -494,6 +614,45 @@ pub fn extract_js_token(html: &str) -> Option<String> {
             let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
             if hex.len() >= 32 {
                 return Some(hex);
+            }
+        }
+    }
+    None
+}
+
+/// 把 cookie 串里的 BDCLND 替换为新值（URL 编码，与 verify 的 Set-Cookie 一致）。
+fn set_bdclnd_in_cookie(cookies: &str, new_bdclnd: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for pair in cookies.split(';') {
+        let p = pair.trim();
+        if p.starts_with("BDCLND=") && !replaced {
+            parts.push(format!("BDCLND={}", new_bdclnd));
+            replaced = true;
+        } else if !p.is_empty() {
+            parts.push(p.to_string());
+        }
+    }
+    if !replaced && !new_bdclnd.is_empty() {
+        parts.push(format!("BDCLND={}", new_bdclnd));
+    }
+    parts.join("; ")
+}
+
+/// 从分享页 HTML 的 `yunData` 里提取 bdstoken（每个分享页动态生成）。
+/// 比 `gettemplatevariable` 接口更可靠：即使登录接口被风控，分享页 HTML 仍带它。
+fn bdstoken_from_html(html: &str) -> Option<String> {
+    // yunData = {..., bdstoken:'xxx', ...}  或  "bdstoken":"xxx"
+    for marker in ["bdstoken: '", "bdstoken:'", "\"bdstoken\":\"", "\"bdstoken\": \""] {
+        if let Some(i) = html.find(marker) {
+            let rest = &html[i + marker.len()..];
+            let token: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            let token = token.trim();
+            if token.len() >= 16 {
+                return Some(token.to_string());
             }
         }
     }
@@ -824,11 +983,11 @@ fn dlink_via_transfer(
     sizes: &std::collections::HashMap<String, u64>,
 ) -> Result<Vec<ResolvedFile>, String> {
     ensure_save_dir(client, referer, cookies, bdstoken)?;
+    let tmp_parent = format!("{SAVE_DIR}/tmp");
+    ensure_save_dir_path(client, referer, cookies, bdstoken, &tmp_parent)?;
     // 每次转存用唯一子目录，避免同名文件冲突，也便于下载后清理。
-    let tmp_dir = format!(
-        "{SAVE_DIR}/.tmp/{}",
-        short_id()
-    );
+    // 注意：百度网盘不允许以点号开头的目录名（如 .tmp），否则会自动退化在根目录创建 QuickGet_日期 文件夹。
+    let tmp_dir = format!("{tmp_parent}/{}", short_id());
     ensure_save_dir_path(client, referer, cookies, bdstoken, &tmp_dir)?;
     let body = format!(
         "fsidlist=%5B{}%5D&path={}",
@@ -1011,18 +1170,18 @@ fn pcs_download_link(cookies: &str, items: &[(String, u64)]) -> Result<Vec<Resol
 /// 删除网盘里的文件/目录。用于下载完成后清理转存的临时文件。
 ///
 /// `POST /api/filemanager?opera=delete`，body `filelist=["/path1","/path2"]`。
-/// 失败只记日志不报错——清理是尽力而为，不应阻断下载流程。
-pub fn delete_files(cookies: &str, paths: &[String]) {
+/// 清理失败会返回错误，让调用方保留任务里的清理信息并在下次启动时重试。
+pub fn delete_files(cookies: &str, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {
-        return;
+        return Ok(());
     }
     let trimmed = select_cookies(cookies);
     let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
-    let client = match crate::core::http::build_client(ua) {
+    let client = match crate::core::http::build_client(ua, None) {
         Ok(c) => c,
         Err(e) => {
             crate::core::log::write(format_args!("百度清理：构建 client 失败：{e}"));
-            return;
+            return Err(format!("构建 client 失败：{e}"));
         }
     };
     let bdstoken = fetch_bdstoken(&client, HOST, &trimmed);
@@ -1036,14 +1195,22 @@ pub fn delete_files(cookies: &str, paths: &[String]) {
     let body = format!("filelist={}", enc(&filelist));
     match post_json(&client, url, HOST, &trimmed, body) {
         Ok(v) => {
-            let errno = errno_of(&v).unwrap_or(-1);
+            let errno = errno_of(&v)?;
             crate::core::log::write(format_args!(
                 "百度清理 {} 个文件：errno={}",
                 paths.len(),
                 errno
             ));
+            if errno == 0 {
+                Ok(())
+            } else {
+                Err(errno_message(errno))
+            }
         }
-        Err(e) => crate::core::log::write(format_args!("百度清理失败：{e}")),
+        Err(e) => {
+            crate::core::log::write(format_args!("百度清理失败：{e}"));
+            Err(e)
+        }
     }
 }
 
@@ -1131,7 +1298,7 @@ pub fn check_login(cookies: &str, ua: &str) -> Result<AccountInfo, String> {
             label: None,
         });
     }
-    let client = crate::core::http::build_client(ua)?;
+    let client = crate::core::http::build_client(ua, None)?;
     let url = format!(
         "{HOST}/rest/2.0/membership/user?channel=chunlei&clienttype=0&web=1&app_id={APP_ID}"
     );
@@ -1165,8 +1332,8 @@ pub fn resolve_share(
         return Err(format!("不是百度网盘分享链接：{}", req.share_url));
     }
     let (tpl_surl, list_surl) = parse_surls(&req.share_url)?;
-    let client = crate::core::http::build_client(ua)?;
-    let cookies = select_cookies(cookies);
+    let client = crate::core::http::build_client(ua, None)?;
+    let mut cookies = select_cookies(cookies);
     let js_token = req
         .js_token
         .as_deref()
@@ -1185,14 +1352,61 @@ pub fn resolve_share(
         ua
     ));
 
-    // 1. sign + timestamp（无需登录态；带上 Cookie 也无妨）。
+    // 1. bdstoken（CSRF，从分享页 HTML 提取）。
+    let bdstoken = fetch_bdstoken(&client, &req.share_url, &cookies);
+
+    // sekey：优先用调用方给的，否则从 Cookie 的 BDCLND 提取（带提取码的分享必需）。
+    let mut sekey = req
+        .sekey
+        .clone()
+        .or_else(|| bdclnd_from_cookies(&cookies));
+
+    // 2. 带提取码的分享：先 POST /share/verify 提交明文提取码。验证成功会
+    //    Set-Cookie 更新 BDCLND（= randsk），后续 tplconfig/share/list/sharedownload
+    //    都需要这份新凭证。必须在 tplconfig 之前执行，否则对新分享 tplconfig 返回
+    //    9019 need verify。
+    let pwd = pwd_from_url(&req.share_url).or_else(|| {
+        req.sekey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    if let Some(pwd) = pwd.as_deref() {
+        if let Some(raw_randsk) = verify_share_pwd(
+            &client,
+            &list_surl,
+            pwd,
+            bdstoken.as_deref(),
+            logid.as_deref(),
+            &req.share_url,
+            &cookies,
+        ) {
+            // randsk（URL 编码）= Set-Cookie BDCLND 的值。
+            // 1. 写入 cookie BDCLND（保持 URL 编码，与服务器 Set-Cookie 一致），
+            //    后续 tplconfig/share/list/sharedownload 用更新后的 cookie。
+            cookies = set_bdclnd_in_cookie(&cookies, &raw_randsk);
+            // 2. percent_decode 得到原始 base64，作为 sekey 参数
+            //    （sharedownload 的 extra.sekey、transfer 的 sekey 参数都用解码后的）。
+            let decoded = percent_encoding::percent_decode_str(&raw_randsk)
+                .decode_utf8_lossy()
+                .to_string();
+            if !decoded.is_empty() {
+                sekey = Some(decoded);
+            }
+        }
+    }
+
+    // 3. sign + timestamp（verify 之后用更新后的 cookie，新分享也能成功）。
     let mut tpl_url = format!(
         "{HOST}/share/tplconfig?surl={tpl_surl}&fields=sign,timestamp&view_mode=1\
          &channel=chunlei&clienttype=0&web=1&app_id={APP_ID}"
     );
-    let bdstoken = fetch_bdstoken(&client, &req.share_url, &cookies);
     if let Some(token) = bdstoken.as_deref() {
         tpl_url.push_str(&format!("&bdstoken={}", enc(token)));
+    }
+    if let Some(lid) = logid.as_deref() {
+        tpl_url.push_str(&format!("&logid={}", enc(lid)));
     }
     let (sign, timestamp) = parse_tplconfig(&get_json(
         &client,
@@ -1202,7 +1416,7 @@ pub fn resolve_share(
     )?)
     .map_err(|e| format!("tplconfig：{e}"))?;
 
-    // 3. 分享信息 + 文件列表。
+    // 4. 分享信息 + 文件列表。
     let mut list_url = format!(
         "{HOST}/share/list?channel=chunlei&clienttype=0&web=1&app_id={APP_ID}\
          &shorturl={list_surl}&root=1&desc=1&showempty=0&order=time&view_mode=1\
@@ -1211,13 +1425,23 @@ pub fn resolve_share(
     if let Some(token) = bdstoken.as_deref() {
         list_url.push_str(&format!("&bdstoken={}", enc(token)));
     }
-    let info = parse_share_list(&get_json(
-        &client,
-        list_url,
-        &req.share_url,
-        Some(&cookies),
-    )?)
-    .map_err(|e| format!("share/list：{e}"))?;
+    if let Some(lid) = logid.as_deref() {
+        list_url.push_str(&format!("&logid={}", enc(lid)));
+    }
+    // 带提取码的分享：share/list 也要携带 sekey，否则返回"提取码验证失败"。
+    if let Some(sk) = sekey.as_deref() {
+        list_url.push_str(&format!("&sekey={}", enc(sk)));
+    }
+    crate::core::log::write(format_args!("百度 share/list URL：{list_url}"));
+    let raw_list = get_json_raw(&client, list_url, &req.share_url, Some(&cookies))
+        .map_err(|e| format!("share/list：{e}"))?;
+    crate::core::log::write(format_args!(
+        "百度 share/list 原始响应：{}",
+        truncate_head(&raw_list, 300)
+    ));
+    let list_v: Value =
+        serde_json::from_str(raw_list.trim()).map_err(|_| "share/list 返回非 JSON".to_string())?;
+    let info = parse_share_list(&list_v).map_err(|e| format!("share/list：{e}"))?;
 
     // 选定要下的文件：显式 fids 优先，否则全部非目录条目。
     let wanted: Vec<String> = if req.fids.is_empty() {
@@ -1232,12 +1456,6 @@ pub fn resolve_share(
     if wanted.is_empty() {
         return Err("分享里没有可下载的文件（文件夹暂不支持，请选中具体文件）".into());
     }
-
-    // sekey：优先用调用方给的，否则从 Cookie 的 BDCLND 提取（带提取码的分享必需）。
-    let sekey = req
-        .sekey
-        .clone()
-        .or_else(|| bdclnd_from_cookies(&cookies));
 
     // 4. 换直链。
     let url = format!(
@@ -1346,8 +1564,15 @@ mod tests {
         assert_eq!(
             parse_surls("https://pan.baidu.com/share/init?surl=AbcDefGhiJklMnoPqrStu").unwrap(),
             (
-                "AbcDefGhiJklMnoPqrStu".into(),
+                "1AbcDefGhiJklMnoPqrStu".into(),
                 "AbcDefGhiJklMnoPqrStu".into()
+            )
+        );
+        assert_eq!(
+            parse_surls("https://pan.baidu.com/s/1S_iAIOiM2qx2jD5XIQ2dug").unwrap(),
+            (
+                "1S_iAIOiM2qx2jD5XIQ2dug".into(),
+                "S_iAIOiM2qx2jD5XIQ2dug".into()
             )
         );
         assert!(parse_surls("https://pan.baidu.com/disk/main").is_err());

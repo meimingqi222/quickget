@@ -4,7 +4,8 @@
 
 use gpui::{actions, px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 use quickget::core::engine::run_task;
-use quickget::core::model::{Task, TaskStatus};
+use quickget::core::limiter::DownloadLimiter;
+use quickget::core::model::Task;
 use quickget::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use quickget::core::settings::{default_download_dir, default_ua};
 use quickget::core::urlx::{detect_protocol, filename_from_url, unique_path, Protocol};
@@ -96,6 +97,8 @@ fn main() {
 fn cli_main(args: &[String]) {
     let mut dir = default_download_dir();
     let mut connections = 16u32;
+    let mut limit_kib = 0u64;
+    let mut proxy = None;
     let mut urls = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -114,9 +117,23 @@ fn cli_main(args: &[String]) {
                     continue;
                 }
             }
+            "--limit" => {
+                if let Some(n) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                    limit_kib = n;
+                    i += 2;
+                    continue;
+                }
+            }
+            "--proxy" => {
+                if let Some(value) = args.get(i + 1) {
+                    proxy = Some(value.clone());
+                    i += 2;
+                    continue;
+                }
+            }
             "--help" | "-h" => {
                 eprintln!(
-                    "QuickGet\n  quickget <url>...\n  --dir <path>   保存目录\n  --connections N  连接数（默认 16）\n  --gui          打开界面"
+                    "QuickGet\n  quickget <url>...\n  --dir <path>   保存目录\n  --connections N  连接数（默认 16）\n  --limit KiB/s  全局限速（0 不限）\n  --proxy URL    HTTP/SOCKS5 代理\n  --gui          打开界面"
                 );
                 return;
             }
@@ -130,6 +147,7 @@ fn cli_main(args: &[String]) {
     }
 
     let ua = default_ua();
+    let limiter = DownloadLimiter::new(limit_kib.saturating_mul(1024));
     let mut failed = 0;
     for url in urls {
         let proto = detect_protocol(&url);
@@ -147,39 +165,28 @@ fn cli_main(args: &[String]) {
         };
         let (filename, dest) = unique_path(&dir, &name);
         eprintln!("→ {filename}");
-        let task = Task {
-            id: uuid::Uuid::new_v4().to_string(),
-            url,
-            filename,
-            save_dir: dir.clone(),
-            protocol: proto,
-            status: TaskStatus::Downloading,
-            size: 0,
-            downloaded: 0,
-            connections,
-            error: None,
-            created_at: 0,
-            finished_at: None,
-            referer: None,
-            cookies: None,
-            user_agent: None,
-            files: Vec::new(),
-            output_dir: if proto == Protocol::Magnet {
-                Some(dest.clone())
-            } else {
-                None
-            },
-            max_part_size: None,
-            cleanup_paths: None,
-            cleanup_cookies: None,
-            peers: Default::default(),
+        let output_dir = if proto == Protocol::Magnet {
+            Some(dest.clone())
+        } else {
+            None
         };
+        let mut task = Task::new(proto, url.clone(), filename, dir.clone(), connections, None, output_dir);
+        // 命令行下载：把「排队时刻」放到启动前，不记入耗时。
+        task.started_at = None;
         let progress = LiveProgress::new(0, 0);
         let ctrl = Control {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
         };
-        match run_task(&task, ua, progress.clone(), ctrl, LiveMeta::new()) {
+        match run_task(
+            &task,
+            ua,
+            progress.clone(),
+            ctrl,
+            LiveMeta::new(),
+            limiter.clone(),
+            proxy.as_deref(),
+        ) {
             JobOutcome::Completed { size, path } => {
                 eprintln!(
                     "  完成 {} ({})",

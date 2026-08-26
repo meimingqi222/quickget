@@ -54,7 +54,7 @@ fn probe_magnet(url: &str) -> Probe {
 }
 
 fn probe_http(url: &str, ua: &str, mut protocol: Protocol) -> Result<Probe, ProbeError> {
-    let client = build_client(ua).map_err(|e| ProbeError::Network(e.to_string()))?;
+    let client = build_client(ua, None).map_err(|e| ProbeError::Network(e.to_string()))?;
     let info = probe_remote(&client, url, None, None).map_err(ProbeError::Network)?;
     let ctype = info.content_type.clone();
     if ctype.contains("mpegurl") || ctype.contains("m3u8") || info.final_url.contains(".m3u8") {

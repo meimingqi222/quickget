@@ -1,21 +1,30 @@
 use crate::ui::components::buttons::{ghost_button, small_button};
+use crate::ui::components::scroll::{drag_capture, drag_to_offset, scroll_metrics, scrollbar, SCROLLBAR_W};
 use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::Root;
 use gpui::{div, prelude::*, px, rgb, Context, IntoElement};
 
 pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
+    const EST_VIEWPORT_H: f32 = 600.0;
+    const EST_CONTENT_H: f32 = 920.0;
     let lang = root.language;
     let folder = root.settings.save_dir.display().to_string();
     let conn = root.settings.connections_clamped();
     let conc = root.settings.max_concurrent_clamped();
+    let limit_kib = root.settings.download_limit_kib();
+    let proxy = root.settings.proxy().unwrap_or_else(|| tr_off(lang));
+    let handle = root.settings_scroll.clone();
+    let metrics = scroll_metrics(&handle, EST_VIEWPORT_H, EST_CONTENT_H);
 
-    div()
+    let content = div()
         .id("settings-scroll")
         .flex_1()
         .min_w(px(0.))
         .h_full()
         .overflow_y_scroll()
+        .track_scroll(&handle)
+        .when(metrics.is_some(), |d| d.pr(px(SCROLLBAR_W)))
         .px_8()
         .py_6()
         .flex()
@@ -88,6 +97,46 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
                 cx,
             ),
         ))
+        .child(row(
+            tr_settings_limit(lang),
+            stepper(
+                limit_kib,
+                0,
+                100_000,
+                |this, v, cx| {
+                    this.settings.download_limit_bps = u64::from(v) * 1024;
+                    this.limiter.set_limit(this.settings.download_limit_bps);
+                    this.settings.save();
+                    cx.notify();
+                },
+                cx,
+            ),
+        ))
+        .child(row(
+            tr_settings_proxy(lang),
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(proxy.to_string()),
+                )
+                .child(
+                    ghost_button(tr_btn_paste(lang).into(), true)
+                        .id("proxy-paste")
+                        .on_click(cx.listener(|this, _, _, cx| this.set_proxy_from_clipboard(cx))),
+                )
+                .child(
+                    ghost_button(tr_btn_clear(lang).into(), root.settings.proxy().is_some())
+                        .id("proxy-clear")
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_proxy(cx))),
+                ),
+        ))
         .child(row(tr_settings_clip(lang), {
             let on = root.settings.watch_clipboard;
             small_button(
@@ -117,6 +166,43 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
             )
             .id("lang-settings")
             .on_click(cx.listener(|this, _, _, cx| this.toggle_language(cx))),
+        ));
+
+    let scrollbar_el = metrics.map(|m| {
+        scrollbar("settings-scroll-thumb", m, |thumb| {
+            thumb.on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    let mouse_y: f32 = event.position.y.into();
+                    let top: f32 = (-this.settings_scroll.offset().y).into();
+                    this.settings_scroll_drag = Some((mouse_y, top.max(0.0)));
+                    cx.notify();
+                }),
+            )
+        })
+    });
+
+    div()
+        .relative()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .child(content)
+        .children(scrollbar_el)
+        .child(drag_capture(
+            cx.entity(),
+            |this, mouse_y, cx| {
+                let Some(start) = this.settings_scroll_drag else { return };
+                if let Some(top) = drag_to_offset(&this.settings_scroll, start, mouse_y) {
+                    this.settings_scroll.set_offset(gpui::point(px(0.0), px(-top)));
+                    cx.notify();
+                }
+            },
+            |this, cx| {
+                if this.settings_scroll_drag.take().is_some() {
+                    cx.notify();
+                }
+            },
         ))
 }
 

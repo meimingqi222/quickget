@@ -3,13 +3,19 @@
 
 use crate::core::http::build_client;
 use crate::core::io::concat_files;
+use crate::core::limiter::DownloadLimiter;
 use crate::core::progress::{Control, JobOutcome, LiveProgress};
 use crate::core::urlx::filename_from_url;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use url::Url;
+
+/// HLS 分片很短，过多线程只会增加文件句柄和上下文切换。
+const MAX_HLS_WORKERS_PER_TASK: u32 = 16;
+const SEGMENT_RETRIES: u32 = 3;
+const SEGMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 pub struct HlsJob<'a> {
     pub url: &'a str,
@@ -20,6 +26,8 @@ pub struct HlsJob<'a> {
     pub cookies: Option<&'a str>,
     pub progress: Arc<LiveProgress>,
     pub ctrl: Control,
+    pub limiter: DownloadLimiter,
+    pub proxy: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +42,7 @@ struct Segment {
 }
 
 pub fn download_hls(job: HlsJob<'_>) -> JobOutcome {
-    let client = match build_client(job.ua) {
+    let client = match build_client(job.ua, job.proxy) {
         Ok(c) => c,
         Err(e) => return JobOutcome::Failed(e),
     };
@@ -80,46 +88,70 @@ pub fn download_hls(job: HlsJob<'_>) -> JobOutcome {
     job.progress.set_total(segs.len() as u64);
     job.progress.downloaded.store(0, Ordering::Relaxed);
 
-    let n = job.connections.clamp(1, 32) as usize;
+    let n = job.connections.clamp(1, MAX_HLS_WORKERS_PER_TASK) as usize;
     let paths: Vec<PathBuf> = (0..segs.len())
         .map(|i| tmp_dir.join(format!("seg-{i:06}")))
         .collect();
 
     let errors = std::sync::Mutex::new(Vec::<String>::new());
+    let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let mut idx_base = 0usize;
-        for chunk in segs.chunks(n.max(1)) {
-            if job.ctrl.interrupted() {
-                break;
-            }
-            for (j, seg) in chunk.iter().enumerate() {
-                let idx = idx_base + j;
-                let client = client.clone();
-                let uri = seg.uri.clone();
+        let next = &next;
+        let segs = &segs;
+        let paths = &paths;
+        for _ in 0..n.min(segs.len()) {
+            let client = client.clone();
+            let progress = job.progress.clone();
+            let ctrl = job.ctrl.clone();
+            let limiter = job.limiter.clone();
+            let referer = job.referer.map(|s| s.to_string());
+            let cookies = job.cookies.map(|s| s.to_string());
+            let errors = &errors;
+            scope.spawn(move || loop {
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= segs.len() || ctrl.interrupted() {
+                    return;
+                }
+                let uri = segs[idx].uri.clone();
                 let dest = paths[idx].clone();
-                let progress = job.progress.clone();
-                let ctrl = job.ctrl.clone();
-                let referer = job.referer.map(|s| s.to_string());
-                let cookies = job.cookies.map(|s| s.to_string());
-                let errors = &errors;
-                scope.spawn(move || {
                     if ctrl.interrupted() {
                         return;
                     }
-                    match fetch_file(&client, &uri, &dest, referer.as_deref(), cookies.as_deref()) {
-                        Ok(bytes) => {
-                            progress.add(1);
-                            let _ = bytes;
+                    let Some(_permit) = crate::core::budget::acquire_network_worker(&ctrl) else {
+                        return;
+                    };
+                    let mut last_error = None;
+                    for attempt in 0..=SEGMENT_RETRIES {
+                        if ctrl.interrupted() {
+                            return;
                         }
-                        Err(e) => {
-                            if let Ok(mut g) = errors.lock() {
-                                g.push(format!("分片 {idx}: {e}"));
+                        match fetch_file(
+                            &client,
+                            &uri,
+                            &dest,
+                            referer.as_deref(),
+                            cookies.as_deref(),
+                            &ctrl,
+                            &limiter,
+                        ) {
+                            Ok(_) => {
+                                progress.add(1);
+                                return;
+                            }
+                            Err(e) => {
+                                last_error = Some(e);
+                                if attempt < SEGMENT_RETRIES {
+                                    std::thread::sleep(std::time::Duration::from_millis(
+                                        200 * (attempt + 1) as u64,
+                                    ));
+                                }
                             }
                         }
                     }
-                });
-            }
-            idx_base += chunk.len();
+                    if let (Some(error), Ok(mut g)) = (last_error, errors.lock()) {
+                        g.push(format!("分片 {idx}: {error}"));
+                    }
+            });
         }
     });
 
@@ -157,7 +189,7 @@ fn fetch_text(
     referer: Option<&str>,
     cookies: Option<&str>,
 ) -> Result<String, String> {
-    let req = crate::core::http::attach_auth(client.get(url), referer, cookies);
+    let req = crate::core::http::attach_auth(client.get(url).timeout(SEGMENT_TIMEOUT), referer, cookies);
     let resp = req.send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
@@ -171,8 +203,10 @@ fn fetch_file(
     dest: &Path,
     referer: Option<&str>,
     cookies: Option<&str>,
+    ctrl: &Control,
+    limiter: &DownloadLimiter,
 ) -> Result<u64, String> {
-    let req = crate::core::http::attach_auth(client.get(url), referer, cookies);
+    let req = crate::core::http::attach_auth(client.get(url).timeout(SEGMENT_TIMEOUT), referer, cookies);
     let mut resp = req.send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
@@ -181,7 +215,11 @@ fn fetch_file(
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = 0u64;
     loop {
-        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+        let allowed = limiter.acquire(buf.len(), ctrl);
+        if allowed == 0 {
+            return Err("下载已暂停或取消".into());
+        }
+        let n = resp.read(&mut buf[..allowed]).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }

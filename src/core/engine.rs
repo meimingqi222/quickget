@@ -4,10 +4,19 @@ use crate::core::bt::{download_bt, BtJob};
 use crate::core::ftp::{download_ftp, FtpJob};
 use crate::core::hls::{default_hls_filename, download_hls, HlsJob};
 use crate::core::http::{download_http, HttpJob};
+use crate::core::limiter::DownloadLimiter;
 use crate::core::model::Task;
 use crate::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use crate::core::urlx::Protocol;
 use std::sync::Arc;
+
+/// 百度 PCS 直链下载用 UA：只认安卓客户端（的 CDN 也不认浏览器/桌面 UA）。
+const BAIDU_PCS_UA: &str =
+    "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;";
+
+fn is_baidu_pcs_url(url: &str) -> bool {
+    url.contains("baidupcs.com") || url.contains("pcs.baidu.com") || url.contains("baidupcs")
+}
 
 pub fn run_task(
     task: &Task,
@@ -15,6 +24,8 @@ pub fn run_task(
     progress: Arc<LiveProgress>,
     ctrl: Control,
     meta: LiveMeta,
+    limiter: DownloadLimiter,
+    proxy: Option<&str>,
 ) -> JobOutcome {
     crate::core::log::write(format_args!(
         "开始 {} {} -> {}",
@@ -37,6 +48,7 @@ pub fn run_task(
             part: &task.part_path(),
             progress,
             ctrl,
+            limiter,
         }),
         Protocol::Hls => {
             let dest = {
@@ -56,21 +68,42 @@ pub fn run_task(
                 cookies: task.cookies.as_deref(),
                 progress,
                 ctrl,
+                limiter,
+                proxy,
             })
         }
-        Protocol::Http => download_http(HttpJob {
-            url: &task.url,
-            dest: &task.dest_path(),
-            part: &task.part_path(),
-            meta_path: &task.meta_path(),
-            connections: task.connections,
-            ua,
-            referer: task.referer.as_deref(),
-            cookies: task.cookies.as_deref(),
-            progress,
-            ctrl,
-            max_part_size: task.max_part_size,
-        }),
+        Protocol::Http => {
+            // 百度 PCS 直链（*.baidupcs.com / *.pcs.baidu.com）只认安卓客户端 UA，
+            // 且单次 Range > 4MB 触发 31326 风控降速。统一在此兜底：
+            // 任何入口（GUI 普通 URL / 网盘解析 / daemon）若未显式指定，就套用
+            // 安卓 UA + 4MB 分片，避免因桌面 UA / 大分片被降速。
+            let is_baidu_pcs = is_baidu_pcs_url(&task.url);
+            let ua = if is_baidu_pcs && task.user_agent.is_none() {
+                BAIDU_PCS_UA
+            } else {
+                ua
+            };
+            let max_part_size = if is_baidu_pcs && task.max_part_size.is_none() {
+                Some(4 * 1024 * 1024)
+            } else {
+                task.max_part_size
+            };
+            download_http(HttpJob {
+                url: &task.url,
+                dest: &task.dest_path(),
+                part: &task.part_path(),
+                meta_path: &task.meta_path(),
+                connections: task.connections,
+                ua,
+                referer: task.referer.as_deref(),
+                cookies: task.cookies.as_deref(),
+                progress,
+                ctrl,
+                max_part_size,
+                limiter,
+                proxy,
+            })
+        }
     }
 }
 
@@ -168,7 +201,7 @@ mod http_live_tests {
         let (url, server) = spawn_range_server(payload);
 
         // 先确认探活通了，再跑引擎。
-        let client = build_client("quickget-test").unwrap();
+        let client = build_client("quickget-test", None).unwrap();
         let resp = client
             .get(&url)
             .header("Range", "bytes=0-0")
@@ -192,6 +225,7 @@ mod http_live_tests {
             connections: 8,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,
@@ -208,7 +242,15 @@ mod http_live_tests {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
         };
-        let outcome = run_task(&task, "quickget-test", progress, ctrl, LiveMeta::new());
+        let outcome = run_task(
+            &task,
+            "quickget-test",
+            progress,
+            ctrl,
+            LiveMeta::new(),
+            DownloadLimiter::new(0),
+            None,
+        );
         let _ = server.join();
         match outcome {
             JobOutcome::Completed { size, path } => {

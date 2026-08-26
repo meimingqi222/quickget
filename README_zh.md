@@ -18,6 +18,7 @@ Downie 侧重网页视频抓取。迅雷侧重把带宽打满。QuickGet 面向�
 - **HLS (m3u8)** 并行下载分片并拼接为 `.ts`。加密流会明确提示暂不支持。
 - **BitTorrent**。磁力链接与 `.torrent` 文件（HTTP 或本地路径）。DHT、Tracker、TCP/uTP 入站、UPnP。未下完的文件可续传。每个任务单独一个文件夹，删除任务会把该文件夹移入回收站。
 - **队列**。同时下载数默认 3，超出部分排队。
+- **全局下载限速**。HTTP/HTTPS、FTP 和 HLS 共用一个带宽上限，可在设置中实时调整。
 - **剪贴板监听**。复制链接后可一键加入队列。
 - **命令行**。`quickget <url>` 无需打开窗口。
 - **中英双语**，首次启动跟随系统语言。
@@ -51,6 +52,7 @@ cargo bundle --release
 ```bash
 quickget https://example.com/file.zip
 quickget --dir ~/Movies --connections 32 https://cdn.example/a.m3u8
+quickget --limit 1024 https://example.com/file.zip # 限速 1024 KiB/s
 quickget "magnet:?xt=urn:btih:..."
 quickget ubuntu-24.04.iso.torrent
 quickget --gui

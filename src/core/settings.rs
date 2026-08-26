@@ -17,6 +17,10 @@ pub struct Settings {
     pub connections: u32,
     /// 同时进行的任务数。
     pub max_concurrent: u32,
+    /// 全局下载速度上限，单位 B/s。0 表示不限速。
+    pub download_limit_bps: u64,
+    /// HTTP 或 SOCKS5 代理地址。空字符串表示直连。
+    pub proxy_url: String,
     pub user_agent: String,
     /// 剪贴板出现新链接时是否提示。
     pub watch_clipboard: bool,
@@ -29,6 +33,8 @@ impl Default for Settings {
             save_dir: default_download_dir(),
             connections: 16,
             max_concurrent: 3,
+            download_limit_bps: 0,
+            proxy_url: String::new(),
             user_agent: default_ua().into(),
             watch_clipboard: true,
         }
@@ -109,6 +115,14 @@ impl Settings {
     pub fn max_concurrent_clamped(&self) -> u32 {
         self.max_concurrent.clamp(1, 16)
     }
+
+    pub fn download_limit_kib(&self) -> u32 {
+        (self.download_limit_bps / 1024).min(100_000) as u32
+    }
+
+    pub fn proxy(&self) -> Option<&str> {
+        (!self.proxy_url.trim().is_empty()).then_some(self.proxy_url.trim())
+    }
 }
 
 #[cfg(test)]
@@ -130,9 +144,13 @@ mod tests {
     }
 
     #[test]
-    fn connections_round_trip() {
-        let s = Settings::merge_json(r#"{"language":"Zh","connections":32,"max_concurrent":5}"#);
+    fn settings_round_trip() {
+        let s = Settings::merge_json(
+            r#"{"language":"Zh","connections":32,"max_concurrent":5,"download_limit_bps":1048576,"proxy_url":"socks5://127.0.0.1:1080"}"#,
+        );
         assert_eq!(s.connections, 32);
         assert_eq!(s.max_concurrent, 5);
+        assert_eq!(s.download_limit_bps, 1_048_576);
+        assert_eq!(s.proxy(), Some("socks5://127.0.0.1:1080"));
     }
 }

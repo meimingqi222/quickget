@@ -9,6 +9,7 @@
 //! 能下。`0-1` 在这些机器上返回 206。
 
 use crate::core::io::{finalize_part, open_part, preallocate, write_at};
+use crate::core::limiter::DownloadLimiter;
 use crate::core::model::suggested_connections;
 use crate::core::progress::{Control, JobOutcome, LiveProgress};
 use crate::core::urlx::filename_from_disposition;
@@ -23,10 +24,16 @@ use std::time::Duration;
 
 const BUF: usize = 256 * 1024;
 const RETRIES: u32 = 8;
+/// 单个 Range 窗口的最大传输时间，超时后从已写偏移重试。
+const RANGE_TIMEOUT: Duration = Duration::from_secs(90);
+/// 单任务超过这个并发度通常只会增加 TLS、线程和磁盘竞争，吞吐收益很小。
+/// 全局调度器尚未引入前，这是保护桌面端资源占用的硬上限。
+const MAX_HTTP_WORKERS_PER_TASK: u32 = 16;
 /// 单次 HTTP Range 窗口。窗口小，空闲连接才能及时把尾巴切开。
 const HTTP_WINDOW: u64 = 4 * 1024 * 1024;
-/// 小于这个的未读尾巴不再拆，避免切得太碎。
-const MIN_STEAL: u64 = 2 * 1024 * 1024;
+/// 尾部只剩一个慢连接时仍要能拆分给空闲 worker。256 KiB 足以摊薄一次
+/// Range 请求开销，同时避免最后 10% 因为 2 MiB 阈值过高而退化成单连接。
+const MIN_STEAL: u64 = 256 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PartMeta {
@@ -43,16 +50,25 @@ pub struct ResumeMeta {
     pub parts: Vec<PartMeta>,
 }
 
-pub fn build_client(ua: &str) -> Result<Client, String> {
-    Client::builder()
+pub fn build_client(ua: &str, proxy: Option<&str>) -> Result<Client, String> {
+    let mut builder = Client::builder()
         .use_rustls_tls()
         .http1_only()
         .redirect(reqwest::redirect::Policy::limited(16))
         .connect_timeout(Duration::from_secs(15))
         .timeout(None)
         .tcp_nodelay(true)
-        .pool_max_idle_per_host(0)
-        .default_headers(default_headers(ua))
+        // 多 worker 并发领分片时频繁建连会触发 TLS 握手/慢启动，掉速明显。
+        // 提高每 host 空闲连接上限，让 worker 领新分片时能复用已建连接。
+        .pool_max_idle_per_host(32)
+        // 百度分享解析需要同一会话：前端拿 bdstoken、share/list、sharedownload 之间
+        // 百度会在响应里 Set-Cookie 更新 BDCLND/sekey 等，必须自动回传，否则被风控。
+        .cookie_store(true)
+        .default_headers(default_headers(ua));
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理地址无效：{e}"))?);
+    }
+    builder
         .build()
         .map_err(|e| e.to_string())
 }
@@ -92,10 +108,12 @@ pub struct HttpJob<'a> {
     /// 百度 PCS 直链对单次 Range > 4MB 回 31326 风控，必须限制每片大小。
     /// 分片数可能超过 connections（线程数），worker 完成自己的片后从池里取新片。
     pub max_part_size: Option<u64>,
+    pub limiter: DownloadLimiter,
+    pub proxy: Option<&'a str>,
 }
 
 pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
-    let client = match build_client(job.ua) {
+    let client = match build_client(job.ua, job.proxy) {
         Ok(c) => c,
         Err(e) => return JobOutcome::Failed(e),
     };
@@ -130,6 +148,8 @@ pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
         progress: job.progress.clone(),
         ctrl: job.ctrl.clone(),
         max_part_size: job.max_part_size,
+        limiter: job.limiter.clone(),
+        proxy: job.proxy,
     };
     job.progress.set_total(info.size);
 
@@ -300,6 +320,15 @@ fn split_ranges_capped(size: u64, cap: u64) -> Vec<(u64, u64)> {
         start = end + 1;
     }
     out
+}
+
+/// 初始就切成比 worker 数更多的小任务，而不是只均分一轮大块。
+/// 这样快连接完成后可立即领取下一块，慢连接不会等到最后 10% 才成为瓶颈。
+fn initial_ranges(size: u64, workers: u32) -> Vec<(u64, u64)> {
+    let workers = u64::from(workers.max(1));
+    // 每个 worker 约有 4 个可领取任务；大文件相应放大块以控制元数据规模。
+    let target = (size / workers.saturating_mul(4)).max(HTTP_WINDOW);
+    split_ranges_capped(size, target)
 }
 
 fn sidecar_paths(dest: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -504,7 +533,7 @@ fn take_work(pool: &Mutex<Vec<Arc<LivePart>>>) -> Option<Arc<LivePart>> {
 }
 
 fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutcome {
-    let n = suggested_connections(info.size, job.connections);
+    let n = suggested_connections(info.size, job.connections).min(MAX_HTTP_WORKERS_PER_TASK);
     let dest_name = job.dest.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let parts: Vec<PartMeta> = if let Some(old) = load_resume(
         job.meta_path,
@@ -516,11 +545,11 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
     ) {
         old.parts
     } else {
-        // 有 max_part_size 时按上限切分（分片数可能 > 线程数，worker 完成后从池取新片）；
-        // 否则按连接数均分。
+        // 分片数始终多于 worker，快连接可以持续领取下一块；网盘源仍可用
+        // 更小的 max_part_size 覆盖默认块大小。
         let ranges = match job.max_part_size {
             Some(cap) if cap > 0 => split_ranges_capped(info.size, cap),
-            _ => split_ranges(info.size, n),
+            _ => initial_ranges(info.size, n),
         };
         ranges
             .into_iter()
@@ -589,6 +618,9 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
             let etag = info.etag.clone();
             let size = info.size;
             scope.spawn(move || {
+                let Some(_permit) = crate::core::budget::acquire_network_worker(&ctrl) else {
+                    return;
+                };
                 range_worker(
                     &client,
                     &url,
@@ -603,6 +635,7 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
                     &job_url,
                     etag.as_deref(),
                     size,
+                    &job.limiter,
                 );
             });
         }
@@ -664,6 +697,7 @@ fn range_worker(
     job_url: &str,
     etag: Option<&str>,
     size: u64,
+    limiter: &DownloadLimiter,
 ) {
     loop {
         if ctrl.interrupted() {
@@ -680,7 +714,7 @@ fn range_worker(
             },
         };
         download_part(
-            client, url, part_path, &part, referer, cookies, progress, ctrl,
+            client, url, part_path, &part, referer, cookies, progress, ctrl, limiter,
         );
         part.busy.store(false, Ordering::Release);
     }
@@ -695,6 +729,7 @@ fn download_part(
     cookies: Option<&str>,
     progress: &LiveProgress,
     ctrl: &Control,
+    limiter: &DownloadLimiter,
 ) {
     let mut attempt = 0u32;
     while unread(part) > 0 {
@@ -711,6 +746,7 @@ fn download_part(
         let window_end = pos.saturating_add(HTTP_WINDOW.saturating_sub(1)).min(end);
         match fetch_range(
             client, url, part_path, pos, window_end, part, referer, cookies, progress, ctrl,
+            limiter,
         ) {
             Ok(()) => {
                 attempt = 0;
@@ -737,6 +773,7 @@ fn fetch_range(
     cookies: Option<&str>,
     progress: &LiveProgress,
     ctrl: &Control,
+    limiter: &DownloadLimiter,
 ) -> Result<(), String> {
     if from > req_end {
         return Ok(());
@@ -748,6 +785,7 @@ fn fetch_range(
         client
             .get(url)
             .header("Range", format!("bytes={from}-{req_end}"))
+            .timeout(RANGE_TIMEOUT)
             .header("Accept-Encoding", "identity"),
         referer,
         cookies,
@@ -772,7 +810,11 @@ fn fetch_range(
         if offset > cur_end {
             return Ok(());
         }
-        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+        let allowed = limiter.acquire(buf.len(), ctrl);
+        if allowed == 0 {
+            return Ok(());
+        }
+        let n = resp.read(&mut buf[..allowed]).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
@@ -852,7 +894,11 @@ fn single_stream(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOu
         if job.ctrl.interrupted() {
             return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), info.size);
         }
-        let n = match resp.read(&mut buf) {
+        let allowed = job.limiter.acquire(buf.len(), &job.ctrl);
+        if allowed == 0 {
+            return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), info.size);
+        }
+        let n = match resp.read(&mut buf[..allowed]) {
             Ok(n) => n,
             Err(e) => return JobOutcome::Failed(e.to_string()),
         };
@@ -933,6 +979,14 @@ mod tests {
         // 覆盖完整
         assert_eq!(parts.first().unwrap().0, 0);
         assert_eq!(parts.last().unwrap().1, 10 * 1024 * 1024 - 1);
+    }
+
+    #[test]
+    fn initial_ranges_offer_multiple_jobs_per_worker() {
+        let parts = initial_ranges(100 * 1024 * 1024, 16);
+        assert!(parts.len() > 16);
+        assert_eq!(parts.first().unwrap().0, 0);
+        assert_eq!(parts.last().unwrap().1, 100 * 1024 * 1024 - 1);
     }
 
     fn live(start: u64, end: u64, written: u64) -> Arc<LivePart> {

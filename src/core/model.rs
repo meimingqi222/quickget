@@ -42,6 +42,9 @@ pub struct Task {
     pub connections: u32,
     pub error: Option<String>,
     pub created_at: i64,
+    /// 本次下载尝试实际开始的时间；排队期间不计入耗时。
+    #[serde(default)]
+    pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
     pub referer: Option<String>,
     /// 浏览器扩展带过来的 Cookie 头，登录态下载靠它。
@@ -97,6 +100,45 @@ pub struct TaskFile {
 }
 
 impl Task {
+    /// 构造一个新下载任务，填入最常用的字段，其余用合理的默认值。
+    /// 调用方可再按需覆盖 `referer` / `cookies` / `user_agent` / `output_dir` /
+    /// `max_part_size` / `started_at` 等公开字段。
+    pub fn new(
+        protocol: Protocol,
+        url: String,
+        filename: String,
+        save_dir: PathBuf,
+        connections: u32,
+        max_part_size: Option<u64>,
+        output_dir: Option<PathBuf>,
+    ) -> Task {
+        let now = chrono::Utc::now().timestamp();
+        Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            url,
+            filename,
+            save_dir,
+            protocol,
+            status: TaskStatus::Downloading,
+            size: 0,
+            downloaded: 0,
+            connections,
+            error: None,
+            created_at: now,
+            started_at: Some(now),
+            finished_at: None,
+            referer: None,
+            cookies: None,
+            user_agent: None,
+            files: Vec::new(),
+            output_dir,
+            max_part_size,
+            cleanup_paths: None,
+            cleanup_cookies: None,
+            peers: Default::default(),
+        }
+    }
+
     pub fn dest_path(&self) -> PathBuf {
         if self.protocol == Protocol::Magnet {
             if let Some(dir) = &self.output_dir {
@@ -189,6 +231,12 @@ impl Task {
         }
     }
 
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        let start = self.started_at?;
+        let end = self.finished_at?;
+        Some(end.saturating_sub(start) as u64)
+    }
+
     /// 详情面板用的文件列表。BT 用种子清单；其它协议就是目标文件本身。
     pub fn display_files(&self) -> Vec<TaskFile> {
         if !self.files.is_empty() {
@@ -276,6 +324,7 @@ pub fn adopt_existing_task(
         TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled => {
             t.status = TaskStatus::Queued;
             t.error = None;
+            t.started_at = None;
             t.finished_at = None;
             Some(AdoptResult::Requeued(name))
         }
@@ -285,6 +334,7 @@ pub fn adopt_existing_task(
             } else {
                 t.status = TaskStatus::Queued;
                 t.error = None;
+                t.started_at = None;
                 t.finished_at = None;
                 Some(AdoptResult::Requeued(name))
             }
@@ -343,6 +393,14 @@ pub fn fmt_eta(remaining: u64, bps: u64) -> String {
         return "--".into();
     }
     let secs = remaining / bps;
+    if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    }
+}
+
+pub fn fmt_duration(secs: u64) -> String {
     if secs >= 3600 {
         format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
     } else {
@@ -409,6 +467,7 @@ mod tests {
             connections: 1,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,
@@ -447,6 +506,7 @@ mod tests {
             connections: 1,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,
@@ -479,6 +539,7 @@ mod tests {
             connections: 1,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,
@@ -523,6 +584,7 @@ mod tests {
             connections: 1,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,
@@ -706,6 +768,7 @@ mod tests {
             connections: 1,
             error: None,
             created_at: 0,
+            started_at: None,
             finished_at: None,
             referer: None,
             cookies: None,

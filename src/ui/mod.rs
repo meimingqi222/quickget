@@ -12,12 +12,13 @@ pub use state::*;
 use crate::core::capture::CaptureJob;
 use crate::core::engine::run_task;
 use crate::core::i18n::{bilingual, Language, Text};
+use crate::core::limiter::DownloadLimiter;
 use crate::core::model::{adopt_existing_task, fmt_speed, truncate, AdoptResult, Task, TaskStatus};
 use crate::core::progress::{Control, JobOutcome, LiveMeta, LiveProgress};
 use crate::core::settings::Settings;
 use crate::core::urlx::{
     detect_protocol, extract_urls, filename_from_source, filename_from_url, is_bt_placeholder,
-    unique_path, Protocol,
+    unique_path, url_identity, Protocol,
 };
 use crate::ui::components::{render_sidebar, render_url_bar, View};
 use crate::ui::i18n::*;
@@ -38,6 +39,7 @@ const BULK_PREVIEW_LIMIT: usize = 8;
 pub struct Root {
     pub language: Language,
     pub settings: Settings,
+    pub limiter: DownloadLimiter,
     pub view: View,
     pub status: Text,
     pub tasks: Vec<Task>,
@@ -54,6 +56,8 @@ pub struct Root {
     pub cursor_blink_task: Option<GpuiTask<()>>,
     pub cursor_blink_wanted: bool,
     pub expanded_task: Option<String>,
+    pub settings_scroll: ScrollHandle,
+    pub settings_scroll_drag: Option<(f32, f32)>,
     pub detail_scroll: ScrollHandle,
     /// 详情文件列表滚动条拖拽：(按下时鼠标 y, 当时的滚动偏移)。
     pub detail_scroll_drag: Option<(f32, f32)>,
@@ -86,6 +90,7 @@ impl Root {
         let url_input = TextInputState::new(cx.focus_handle());
         let mut root = Self {
             language: settings.language,
+            limiter: DownloadLimiter::new(settings.download_limit_bps),
             settings,
             view: View::All,
             status: bilingual(|l| tr_status_ready(l)),
@@ -103,6 +108,8 @@ impl Root {
             cursor_blink_task: None,
             cursor_blink_wanted: false,
             expanded_task: None,
+            settings_scroll: ScrollHandle::new(),
+            settings_scroll_drag: None,
             detail_scroll: ScrollHandle::new(),
             detail_scroll_drag: None,
             pending_confirm: None,
@@ -118,6 +125,7 @@ impl Root {
         root.start_tick(cx);
         root.start_clipboard_watch(cx);
         root.start_inbox_watch(cx);
+        root.retry_pending_transfer_cleanups(cx);
         root.pump_queue(cx);
         root
     }
@@ -252,6 +260,7 @@ impl Root {
                 connections: self.settings.connections_clamped(),
                 error: None,
                 created_at: now,
+                started_at: None,
                 finished_at: None,
                 referer: None,
                 cookies: None,
@@ -351,6 +360,7 @@ impl Root {
             connections: self.settings.connections_clamped(),
             error: None,
             created_at: now_secs(),
+            started_at: None,
             finished_at: None,
             referer: job.referer,
             cookies: job.cookies,
@@ -448,7 +458,22 @@ impl Root {
                     .map(|s| s.to_string())
                     .unwrap_or(ua);
                 let max_part = provider.max_part_size();
+                let mut added = 0usize;
+                let mut known = 0usize;
                 for f in files {
+                    if let Some(unused_transfer_paths) =
+                        self.adopt_netdisk_file(&referer, &f, &file_ua, max_part, &netdisk_cookies)
+                    {
+                        known += 1;
+                        if !unused_transfer_paths.is_empty() {
+                            self.schedule_orphan_transfer_cleanup(
+                                unused_transfer_paths,
+                                netdisk_cookies.clone(),
+                                cx,
+                            );
+                        }
+                        continue;
+                    }
                     // 收集转存路径用于下载后清理（仅百度转存方式有 transfer_path）。
                     let cleanup = f.transfer_path.as_ref().map(|p| vec![p.clone()]);
                     let cleanup_ck = cleanup.as_ref().map(|_| netdisk_cookies.clone());
@@ -465,9 +490,18 @@ impl Root {
                         },
                         cx,
                     );
+                    added += 1;
                 }
                 let name = provider.display_name();
-                self.status = bilingual(|l| tr_netdisk_added(l, name, count, account.clone()));
+                self.status = if added == 0 {
+                    bilingual(|l| tr_netdisk_already(l, name, known))
+                } else {
+                    bilingual(|l| tr_netdisk_added(l, name, count, account.clone()))
+                };
+                if known > 0 {
+                    self.persist();
+                    self.pump_queue(cx);
+                }
             }
         }
         cx.notify();
@@ -482,6 +516,148 @@ impl Root {
         ua: Option<String>,
     ) -> Option<AdoptResult> {
         adopt_existing_task(&mut self.tasks, url, cookies, referer, ua)
+    }
+
+    /// 网盘直链每次解析都可能变化，不能拿 dlink 判重；用分享页 + 文件名作为稳定身份。
+    /// 此处位于所有 `ShareProvider` 的统一入队边界，新增网盘插件自动复用。
+    /// 失败/暂停任务更新为新的 dlink 后重新入队，完成或进行中的任务则不重复创建。
+    fn adopt_netdisk_file(
+        &mut self,
+        referer: &str,
+        file: &crate::core::providers::ResolvedFile,
+        ua: &str,
+        max_part_size: Option<u64>,
+        cleanup_cookies: &str,
+    ) -> Option<Vec<String>> {
+        let Some(task) = self.tasks.iter_mut().find(|task| {
+            task.referer.as_deref() == Some(referer) && task.filename == file.filename
+        }) else {
+            return None;
+        };
+        match task.status {
+            TaskStatus::Completed if !task.dest_path().exists() => {
+                task.url = file.dlink.clone();
+                task.user_agent = Some(ua.to_string());
+                task.max_part_size = max_part_size;
+                task.cleanup_paths = file.transfer_path.as_ref().map(|path| vec![path.clone()]);
+                task.cleanup_cookies = file
+                    .transfer_path
+                    .as_ref()
+                    .map(|_| cleanup_cookies.to_string());
+                task.status = TaskStatus::Queued;
+                task.error = None;
+                task.started_at = None;
+                task.finished_at = None;
+            }
+            TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled => {
+                task.url = file.dlink.clone();
+                task.user_agent = Some(ua.to_string());
+                task.max_part_size = max_part_size;
+                task.cleanup_paths = file.transfer_path.as_ref().map(|path| vec![path.clone()]);
+                task.cleanup_cookies = file
+                    .transfer_path
+                    .as_ref()
+                    .map(|_| cleanup_cookies.to_string());
+                task.status = TaskStatus::Queued;
+                task.error = None;
+                task.started_at = None;
+                task.finished_at = None;
+            }
+            TaskStatus::Queued | TaskStatus::Probing | TaskStatus::Downloading => {
+                // 并发重复解析会产生一个未使用的新转存副本。把它并入正在下载
+                // 任务的清理列表，避免该副本永远留在网盘里。
+                if let Some(path) = &file.transfer_path {
+                    let paths = task.cleanup_paths.get_or_insert_with(Vec::new);
+                    if !paths.contains(path) {
+                        paths.push(path.clone());
+                    }
+                    task.cleanup_cookies = Some(cleanup_cookies.to_string());
+                }
+            }
+            TaskStatus::Completed => {
+                // 本地成品仍在时无需重新下载；本次解析生成的转存副本没有被任何
+                // 任务使用，应立即清理。
+                return Some(file.transfer_path.iter().cloned().collect());
+            }
+        }
+        Some(Vec::new())
+    }
+
+    /// 成功下载后的转存清理必须确认服务端接受，才从任务中移除凭据；否则保留到
+    /// 下次程序启动重试，避免网络中断或退出时把百度临时文件遗留在网盘里。
+    fn schedule_transfer_cleanup(
+        &mut self,
+        id: String,
+        paths: Vec<String>,
+        cookies: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.cleanup_tasks.push(cx.spawn(async move |this, cx| {
+            let paths_for_request = paths.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::core::providers::baidu::delete_files(&cookies, &paths_for_request)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if let Some(task) = this.tasks.iter_mut().find(|task| task.id == id) {
+                            if task.cleanup_paths.as_ref() == Some(&paths) {
+                                task.cleanup_paths = None;
+                                task.cleanup_cookies = None;
+                                this.persist();
+                            }
+                        }
+                    }
+                    Err(e) => crate::core::log::write(format_args!(
+                        "百度转存临时文件尚未清理，将在下次启动重试：{e}"
+                    )),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn retry_pending_transfer_cleanups(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Completed)
+            .filter_map(|task| {
+                Some((
+                    task.id.clone(),
+                    task.cleanup_paths.clone()?,
+                    task.cleanup_cookies.clone()?,
+                ))
+            })
+            .collect();
+        for (id, paths, cookies) in pending {
+            if !paths.is_empty() {
+                self.schedule_transfer_cleanup(id, paths, cookies, cx);
+            }
+        }
+    }
+
+    fn schedule_orphan_transfer_cleanup(
+        &mut self,
+        paths: Vec<String>,
+        cookies: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.cleanup_tasks.push(cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::core::providers::baidu::delete_files(&cookies, &paths) })
+                .await;
+            if let Err(e) = result {
+                crate::core::log::write(format_args!(
+                    "百度未使用的转存副本清理失败：{e}"
+                ));
+            }
+        }));
     }
 
     fn buffer_captures(&mut self, jobs: Vec<CaptureJob>, cx: &mut Context<Self>) {
@@ -586,6 +762,9 @@ impl Root {
         }
         self.tasks[idx].status = TaskStatus::Downloading;
         self.tasks[idx].error = None;
+        if self.tasks[idx].started_at.is_none() {
+            self.tasks[idx].started_at = Some(now_secs());
+        }
         let task = self.tasks[idx].clone();
         let ua = task
             .user_agent
@@ -600,10 +779,22 @@ impl Root {
         let ctrl_bg = ctrl.clone();
         let progress_bg = progress.clone();
         let meta_bg = meta.clone();
+        let limiter = self.limiter.clone();
+        let proxy = self.settings.proxy().map(str::to_string);
 
         let work = cx
             .background_executor()
-            .spawn(async move { run_task(&task, &ua, progress_bg, ctrl_bg, meta_bg) });
+            .spawn(async move {
+                run_task(
+                    &task,
+                    &ua,
+                    progress_bg,
+                    ctrl_bg,
+                    meta_bg,
+                    limiter,
+                    proxy.as_deref(),
+                )
+            });
         let id_owned = id.to_string();
         let gpui_task = cx.spawn(async move |this, cx| {
             let outcome = work.await;
@@ -639,6 +830,7 @@ impl Root {
             .get(id)
             .map(|s| s.ctrl.is_pause())
             .unwrap_or(true);
+        let mut cleanup = None;
         let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) else {
             return;
         };
@@ -676,14 +868,12 @@ impl Root {
                 t.peers = Default::default();
                 let name = t.filename.clone();
                 self.status = bilingual(|l| tr_status_done(l, &name));
-                // 下载成功后清理网盘转存的临时文件（尽力而为，不阻断）。
-                if let (Some(paths), Some(ck)) = (t.cleanup_paths.take(), t.cleanup_cookies.take()) {
+                // 清理成功前不能丢掉路径和 Cookie，否则失败后无法恢复。
+                if let (Some(paths), Some(ck)) =
+                    (t.cleanup_paths.clone(), t.cleanup_cookies.clone())
+                {
                     if !paths.is_empty() {
-                        cx.background_executor()
-                            .spawn(async move {
-                                crate::core::providers::baidu::delete_files(&ck, &paths);
-                            })
-                            .detach();
+                        cleanup = Some((paths, ck));
                     }
                 }
             }
@@ -711,6 +901,40 @@ impl Root {
                 t.finished_at = Some(now_secs());
                 self.status = bilingual(|l| tr_status_fail(l, &msg));
             }
+        }
+        if let Some((paths, cookies)) = cleanup {
+            let request_paths = self.transfer_cleanup_request_paths(id, &paths);
+            if request_paths != paths {
+                if let Some(task) = self.tasks.iter_mut().find(|task| task.id == id) {
+                    task.cleanup_paths = Some(request_paths.clone());
+                }
+            }
+            self.schedule_transfer_cleanup(id.to_string(), request_paths, cookies, cx);
+        }
+    }
+
+    /// 同一批分享文件会被转存到同一个随机目录。最后一个任务完成时直接删除该
+    /// 目录（包含最后一个文件），既清理文件也不会留下空目录；尚有同目录任务
+    /// 在下载时则只删当前文件，避免提前删掉其下载源。
+    fn transfer_cleanup_request_paths(&self, id: &str, paths: &[String]) -> Vec<String> {
+        let mut dirs: Vec<String> = paths.iter().filter_map(|path| transfer_dir(path)).collect();
+        dirs.sort();
+        dirs.dedup();
+        if dirs.is_empty()
+            || self.tasks.iter().any(|task| {
+                task.id != id
+                    && task.status.is_open()
+                    && task
+                        .cleanup_paths
+                        .as_deref()
+                        .is_some_and(|other| other.iter().any(|path| {
+                            transfer_dir(path).is_some_and(|dir| dirs.contains(&dir))
+                        }))
+            })
+        {
+            paths.to_vec()
+        } else {
+            dirs
         }
     }
 
@@ -872,6 +1096,11 @@ impl Root {
         cx.notify();
         if !wait_for_stop {
             if let Some(task) = task {
+                if let (Some(paths), Some(cookies)) =
+                    (task.cleanup_paths.clone(), task.cleanup_cookies.clone())
+                {
+                    self.schedule_orphan_transfer_cleanup(paths, cookies, cx);
+                }
                 crate::core::io::trash_paths(&leftover_paths_for_remove(task, live_meta.as_ref()));
             }
             self.runtime.remove(id);
@@ -890,12 +1119,26 @@ impl Root {
                     break;
                 }
             }
-            let paths = task
-                .map(|t| leftover_paths_for_remove(t, live_meta.as_ref()))
+            let (paths, remote_cleanup) = task
+                .map(|t| {
+                    let remote = match (t.cleanup_paths.clone(), t.cleanup_cookies.clone()) {
+                        (Some(paths), Some(cookies)) if !paths.is_empty() => Some((paths, cookies)),
+                        _ => None,
+                    };
+                    (leftover_paths_for_remove(t, live_meta.as_ref()), remote)
+                })
                 .unwrap_or_default();
             cx.background_executor()
                 .spawn(async move {
                     crate::core::io::trash_paths(&paths);
+                    if let Some((paths, cookies)) = remote_cleanup {
+                        if let Err(e) = crate::core::providers::baidu::delete_files(&cookies, &paths)
+                        {
+                            crate::core::log::write(format_args!(
+                                "删除任务后的百度转存清理失败：{e}"
+                            ));
+                        }
+                    }
                 })
                 .await;
             this.update(cx, |this, _| {
@@ -906,6 +1149,15 @@ impl Root {
     }
 
     pub fn clear_done(&mut self, cx: &mut Context<Self>) {
+        let cleanups: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Completed)
+            .filter_map(|task| Some((task.cleanup_paths.clone()?, task.cleanup_cookies.clone()?)))
+            .collect();
+        for (paths, cookies) in cleanups {
+            self.schedule_orphan_transfer_cleanup(paths, cookies, cx);
+        }
         self.tasks.retain(|t| t.status != TaskStatus::Completed);
         self.persist();
         cx.notify();
@@ -929,6 +1181,22 @@ impl Root {
             self.settings.save();
             cx.notify();
         }
+    }
+
+    pub fn set_proxy_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let Some(text) = item.text() else { return };
+        self.settings.proxy_url = text.trim().to_string();
+        self.settings.save();
+        cx.notify();
+    }
+
+    pub fn clear_proxy(&mut self, cx: &mut Context<Self>) {
+        self.settings.proxy_url.clear();
+        self.settings.save();
+        cx.notify();
     }
 
     pub fn start_tick(&mut self, cx: &mut Context<Self>) {
@@ -986,10 +1254,16 @@ impl Root {
                     return;
                 }
                 this.last_clipboard = trimmed.clone();
-                if extract_urls(&trimmed).is_empty() {
+                let urls = collect_downloadable_urls(&trimmed);
+                if urls.is_empty() {
                     return;
                 }
                 if this.url_input.text.trim() == trimmed {
+                    return;
+                }
+                // 已完成且成品仍在，或已经排队/下载中的任务，不应再打断用户。
+                // 失败任务保留提示，让用户可以通过剪贴板重新入队。
+                if clipboard_urls_are_known(&this.tasks, &urls) {
                     return;
                 }
                 this.clip_hint = Some(trimmed);
@@ -1050,6 +1324,25 @@ fn status_after_engine_pause(pause_still_wanted: bool) -> TaskStatus {
     } else {
         TaskStatus::Queued
     }
+}
+
+/// QuickGet 自己创建的转存文件路径形如 `/QuickGet/.tmp/<随机目录>/<文件>`。
+/// 只允许删除这个随机目录，绝不能向上删除 `.tmp` 或用户的 `/QuickGet` 目录。
+fn transfer_dir(path: &str) -> Option<String> {
+    let marker = "/QuickGet/.tmp/";
+    let rest = path.strip_prefix(marker)?;
+    let name = rest.split('/').next()?;
+    (!name.is_empty()).then(|| format!("{marker}{name}"))
+}
+
+fn clipboard_urls_are_known(tasks: &[Task], urls: &[String]) -> bool {
+    urls.iter().all(|url| {
+        let identity = url_identity(url);
+        tasks.iter().any(|task| {
+            url_identity(&task.url) == identity
+                && (task.status != TaskStatus::Completed || task.dest_path().exists())
+        })
+    })
 }
 
 fn leftover_paths_for_remove(mut task: Task, meta: Option<&LiveMeta>) -> Vec<std::path::PathBuf> {
@@ -1380,6 +1673,33 @@ fn preview_name_for_job(job: &CaptureJob) -> String {
 mod tests {
     use super::*;
 
+    fn task(url: &str, status: TaskStatus, dir: std::path::PathBuf) -> Task {
+        Task {
+            id: "task".into(),
+            url: url.into(),
+            filename: "file.bin".into(),
+            save_dir: dir,
+            protocol: Protocol::Http,
+            status,
+            size: 1,
+            downloaded: 1,
+            connections: 1,
+            error: None,
+            created_at: 0,
+            started_at: None,
+            finished_at: None,
+            referer: None,
+            cookies: None,
+            user_agent: None,
+            files: Vec::new(),
+            output_dir: None,
+            max_part_size: None,
+            cleanup_paths: None,
+            cleanup_cookies: None,
+            peers: Default::default(),
+        }
+    }
+
     #[test]
     fn bulk_threshold_is_three() {
         assert!(!should_confirm_bulk(0));
@@ -1409,5 +1729,22 @@ mod tests {
     fn engine_pause_is_cancellable() {
         assert_eq!(status_after_engine_pause(true), TaskStatus::Paused);
         assert_eq!(status_after_engine_pause(false), TaskStatus::Queued);
+    }
+
+    #[test]
+    fn clipboard_skips_known_completed_or_active_urls() {
+        let dir = std::env::temp_dir().join(format!("quickget-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let completed = task("https://example.com/file.bin?sid=old", TaskStatus::Completed, dir.clone());
+        std::fs::write(completed.dest_path(), b"done").unwrap();
+        assert!(clipboard_urls_are_known(
+            &[completed],
+            &["https://example.com/file.bin?sid=new".into()]
+        ));
+        assert!(clipboard_urls_are_known(
+            &[task("https://example.com/active.bin", TaskStatus::Downloading, dir.clone())],
+            &["https://example.com/active.bin".into()]
+        ));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

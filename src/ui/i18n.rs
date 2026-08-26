@@ -211,6 +211,30 @@ pub fn tr_detail_save(lang: Language) -> &'static str {
         Language::En => "Save to",
     }
 }
+pub fn tr_detail_started(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "开始时间",
+        Language::En => "Started",
+    }
+}
+pub fn tr_detail_finished(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "完成时间",
+        Language::En => "Finished",
+    }
+}
+pub fn tr_detail_duration(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "耗时",
+        Language::En => "Duration",
+    }
+}
+pub fn tr_detail_average_speed(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "平均速度",
+        Language::En => "Average speed",
+    }
+}
 pub fn tr_detail_files(lang: Language, n: usize) -> String {
     match lang {
         Language::Zh => format!("{n} 个文件"),
@@ -491,6 +515,30 @@ pub fn tr_settings_conc(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "同时下载数",
         Language::En => "Concurrent downloads",
+    }
+}
+pub fn tr_settings_limit(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "全局限速 (KiB/s，0 不限)",
+        Language::En => "Global limit (KiB/s, 0 = unlimited)",
+    }
+}
+pub fn tr_settings_proxy(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "代理（从剪贴板粘贴）",
+        Language::En => "Proxy (paste from clipboard)",
+    }
+}
+pub fn tr_netdisk_already(lang: Language, provider: &str, count: usize) -> String {
+    match lang {
+        Language::Zh => format!("{provider}：{count} 个文件已在任务列表中"),
+        Language::En => format!("{provider}: {count} file(s) already in the task list"),
+    }
+}
+pub fn tr_btn_clear(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "清除",
+        Language::En => "Clear",
     }
 }
 pub fn tr_settings_ua(lang: Language) -> &'static str {

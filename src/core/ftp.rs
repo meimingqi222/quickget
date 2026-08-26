@@ -1,6 +1,7 @@
 //! FTP 单连接下载，支持 REST 续传。
 
 use crate::core::io::{finalize_part, open_part, preallocate, write_at};
+use crate::core::limiter::DownloadLimiter;
 use crate::core::progress::{Control, JobOutcome, LiveProgress};
 use crate::core::urlx::{filename_from_url, Protocol};
 use std::path::Path;
@@ -79,9 +80,13 @@ pub struct FtpJob<'a> {
     pub part: &'a Path,
     pub progress: Arc<LiveProgress>,
     pub ctrl: Control,
+    pub limiter: DownloadLimiter,
 }
 
 pub fn download_ftp(job: FtpJob<'_>) -> JobOutcome {
+    let Some(_permit) = crate::core::budget::acquire_network_worker(&job.ctrl) else {
+        return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), job.progress.total());
+    };
     let t = match parse_ftp(job.url) {
         Ok(t) => t,
         Err(e) => return JobOutcome::Failed(e),
@@ -127,7 +132,13 @@ pub fn download_ftp(job: FtpJob<'_>) -> JobOutcome {
             if job.ctrl.interrupted() {
                 break;
             }
-            let n = reader.read(&mut buf).map_err(FtpError::ConnectionError)?;
+            let allowed = job.limiter.acquire(buf.len(), &job.ctrl);
+            if allowed == 0 {
+                break;
+            }
+            let n = reader
+                .read(&mut buf[..allowed])
+                .map_err(FtpError::ConnectionError)?;
             if n == 0 {
                 break;
             }

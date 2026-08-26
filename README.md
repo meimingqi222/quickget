@@ -18,6 +18,7 @@ Downie is built for grabbing video from web pages. Thunder was built to saturate
 - **HLS (m3u8)** parallel segment fetch, concatenated to `.ts`. Encrypted playlists are refused with a clear message.
 - **BitTorrent**. Magnet links and `.torrent` files (HTTP URL or local path). DHT, trackers, incoming TCP/uTP peers, UPnP. Resume from partial files. Each torrent is stored in its own folder; deleting the task moves that folder to the trash.
 - **Queue**. Cap concurrent tasks (default 3). The rest wait.
+- **Global download limit**. HTTP/HTTPS, FTP, and HLS share one bandwidth cap, adjustable live in Settings.
 - **Clipboard watch**. Copy a URL, the app asks if you want to download it.
 - **CLI**. `quickget <url>` downloads without opening the window.
 - **Bilingual** 中文 / English, follows the OS on first launch.
@@ -51,6 +52,7 @@ cargo bundle --release
 ```bash
 quickget https://example.com/file.zip
 quickget --dir ~/Movies --connections 32 https://cdn.example/a.m3u8
+quickget --limit 1024 https://example.com/file.zip # 1024 KiB/s
 quickget "magnet:?xt=urn:btih:..."
 quickget ubuntu-24.04.iso.torrent
 quickget --gui

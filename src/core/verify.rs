@@ -3,6 +3,35 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use sha2::{Digest, Sha256};
+
+/// 计算文件 SHA-256，供下载页或外部自动化与发布方给出的校验值比对。
+pub fn sha256(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buf = [0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    let expected = expected.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("SHA-256 必须是 64 位十六进制字符串".into());
+    }
+    let actual = sha256(path)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("SHA-256 不匹配：实际 {actual}"))
+    }
+}
 
 pub fn read_at(path: &Path, offset: u64, n: usize) -> Option<Vec<u8>> {
     let mut f = File::open(path).ok()?;
@@ -203,6 +232,18 @@ mod tests {
     fn non_zip_with_data_ok() {
         let p = temp_file(b"not a zip but real bytes");
         verify_finished(&p, 10, "a.bin").unwrap();
+        cleanup(&p);
+    }
+
+    #[test]
+    fn sha256_matches_known_value() {
+        let p = temp_file(b"abc");
+        verify_sha256(
+            &p,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .unwrap();
+        assert!(verify_sha256(&p, &"0".repeat(64)).is_err());
         cleanup(&p);
     }
 }

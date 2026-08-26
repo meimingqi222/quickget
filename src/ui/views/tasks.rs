@@ -1,4 +1,4 @@
-use crate::core::model::{fmt_eta, fmt_size, fmt_speed, truncate, Task, TaskStatus};
+use crate::core::model::{fmt_duration, fmt_eta, fmt_size, fmt_speed, truncate, Task, TaskStatus};
 use crate::core::urlx::Protocol;
 use crate::ui::components::buttons::small_button;
 use crate::ui::components::scroll::{
@@ -9,6 +9,7 @@ use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::Root;
 use gpui::{div, prelude::*, px, relative, rgb, Context, IntoElement, SharedString};
+use chrono::{Local, TimeZone};
 
 /// 展开详情里文件列表的最大高度。超出这条才出滚动条。
 const DETAIL_LIST_MAX_H: f32 = 240.0;
@@ -307,6 +308,22 @@ fn render_task_detail(root: &Root, t: &Task, cx: &mut Context<Root>) -> impl Int
             t.dest_path().display().to_string(),
         ));
 
+    if let Some(started) = t.started_at {
+        body = body.child(detail_row(tr_detail_started(lang), fmt_timestamp(started)));
+    }
+    if let Some(finished) = t.finished_at {
+        body = body.child(detail_row(tr_detail_finished(lang), fmt_timestamp(finished)));
+    }
+    if let Some(elapsed) = t.elapsed_secs() {
+        body = body.child(detail_row(tr_detail_duration(lang), fmt_duration(elapsed)));
+        if t.size > 0 && elapsed > 0 {
+            body = body.child(detail_row(
+                tr_detail_average_speed(lang),
+                fmt_speed(t.size / elapsed),
+            ));
+        }
+    }
+
     if t.protocol == Protocol::Magnet
         && (t.status.is_active() || t.status == TaskStatus::Paused || !t.peers.is_idle())
     {
@@ -453,4 +470,12 @@ fn detail_row(label: &str, value: String) -> impl IntoElement {
                 .text_color(rgb(TEXT))
                 .child(value),
         )
+}
+
+fn fmt_timestamp(secs: i64) -> String {
+    Local
+        .timestamp_opt(secs, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "--".into())
 }

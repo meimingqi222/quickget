@@ -7,6 +7,7 @@ description = "Lightweight multi-protocol download manager (HTTP, FTP, HLS, BitT
 license = "MIT"
 
 [dependencies]
+axum = "0.8"
 # `default-features = false` 关掉 Linux 的 wayland/x11 和 Windows 的 manifest，
 # 但必须保留 `font-kit`——否则 macOS 上会用 NoopTextSystem，文字全部不可见。
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
@@ -16,12 +17,13 @@ serde_json = "1"
 chrono = "0.4"
 url = "2"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks", "cookies"] }
 suppaftp = { version = "6", default-features = false }
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
 rfd = "0.15"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 [features]
 # 启用百度网盘 sharedownload 逆向解析（DES-ECB 解密加密 list）。
