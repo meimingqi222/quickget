@@ -499,34 +499,70 @@ pub fn tr_status_label(lang: Language, s: TaskStatus) -> &'static str {
     }
 }
 
+pub fn tr_settings_sec_download(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "下载与存储",
+        Language::En => "Download & Storage",
+    }
+}
+pub fn tr_settings_sec_network(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "网络与传输",
+        Language::En => "Network & Transfer",
+    }
+}
+pub fn tr_settings_sec_general(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "常规与偏好",
+        Language::En => "General & Preferences",
+    }
+}
+pub fn tr_settings_sec_about(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "关于与扩展",
+        Language::En => "About & Extensions",
+    }
+}
+pub fn tr_settings_limit_sub(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "单位 KiB/s，设为 0 表示不限制",
+        Language::En => "In KiB/s, set to 0 for unlimited",
+    }
+}
+pub fn tr_settings_clip_sub(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "复制下载链接时自动弹出新建任务",
+        Language::En => "Automatically prompt when download link is copied",
+    }
+}
 pub fn tr_settings_folder(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "保存到",
-        Language::En => "Save to",
+        Language::Zh => "默认保存目录",
+        Language::En => "Default save folder",
     }
 }
 pub fn tr_settings_conn(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "单文件连接数",
+        Language::Zh => "单文件连接分段数",
         Language::En => "Connections per file",
     }
 }
 pub fn tr_settings_conc(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "同时下载数",
+        Language::Zh => "同时下载任务数",
         Language::En => "Concurrent downloads",
     }
 }
 pub fn tr_settings_limit(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "全局限速 (KiB/s，0 不限)",
-        Language::En => "Global limit (KiB/s, 0 = unlimited)",
+        Language::Zh => "全局下载限速",
+        Language::En => "Global download limit",
     }
 }
 pub fn tr_settings_proxy(lang: Language) -> &'static str {
     match lang {
-        Language::Zh => "代理（从剪贴板粘贴）",
-        Language::En => "Proxy (paste from clipboard)",
+        Language::Zh => "网络代理",
+        Language::En => "Network proxy",
     }
 }
 pub fn tr_netdisk_already(lang: Language, provider: &str, count: usize) -> String {
@@ -573,6 +609,114 @@ pub fn tr_settings_ext(lang: Language) -> &'static str {
         Language::En => "Chromium extension: right-click a link to send it here with cookies. Browser downloads are not hijacked by default.",
     }
 }
+pub fn tr_update_check(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "检查更新",
+        Language::En => "Check for Updates",
+    }
+}
+pub fn tr_update_checking(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "正在检查更新…",
+        Language::En => "Checking for updates…",
+    }
+}
+pub fn tr_update_available(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "发现新版本",
+        Language::En => "Update Available",
+    }
+}
+pub fn tr_update_latest(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "已是最新版本",
+        Language::En => "Up to date",
+    }
+}
+pub fn tr_update_download(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "下载并安装",
+        Language::En => "Download & Install",
+    }
+}
+pub fn tr_update_downloading(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "正在下载更新…",
+        Language::En => "Downloading update…",
+    }
+}
+pub fn tr_update_verifying(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "正在校验完整性…",
+        Language::En => "Verifying checksum…",
+    }
+}
+pub fn tr_update_restart_install(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "重启并安装",
+        Language::En => "Restart & Install",
+    }
+}
+pub fn tr_update_installing(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "正在准备安装…",
+        Language::En => "Preparing update…",
+    }
+}
+pub fn tr_update_failed(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "更新失败",
+        Language::En => "Update Failed",
+    }
+}
+pub fn tr_update_retry(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "重试",
+        Language::En => "Retry",
+    }
+}
+pub fn tr_update_later(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "稍后再说",
+        Language::En => "Later",
+    }
+}
+pub fn tr_update_skip(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "跳过此版本",
+        Language::En => "Skip this version",
+    }
+}
+pub fn tr_update_ready_hint(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "新版本已下载完毕。点击重启将自动替换并启动新版本。",
+        Language::En => "Update downloaded. Restart to replace and launch the new version.",
+    }
+}
+pub fn tr_update_auto_check(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "自动检查更新",
+        Language::En => "Check for updates automatically",
+    }
+}
+pub fn tr_update_auto_check_sub(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "启动时及每隔 4 小时在后台静默检查新版本",
+        Language::En => "Check in background on startup and every 4 hours",
+    }
+}
+pub fn tr_update_active_tasks_warn(lang: Language, count: usize) -> String {
+    match lang {
+        Language::Zh => format!("当前有 {count} 个下载任务正在进行。重启将保存进度并无缝接续，是否立即更新？"),
+        Language::En => format!("{count} downloads are active. Progress will be saved before restart. Update now?"),
+    }
+}
+pub fn tr_update_dialog_title(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "软件更新",
+        Language::En => "Software Update",
+    }
+}
 pub fn tr_on(lang: Language) -> &'static str {
     match lang {
         Language::Zh => "开",
@@ -585,6 +729,170 @@ pub fn tr_off(lang: Language) -> &'static str {
         Language::En => "Off",
     }
 }
+
+pub fn tr_btn_select_all(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "全选",
+        Language::En => "Select All",
+    }
+}
+pub fn tr_btn_unselect_all(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "取消选择",
+        Language::En => "Deselect All",
+    }
+}
+pub fn tr_selected_count(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已选 {n} 项"),
+        Language::En => format!("{n} selected"),
+    }
+}
+pub fn tr_btn_pause_selected(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "暂停",
+        Language::En => "Pause",
+    }
+}
+pub fn tr_btn_resume_selected(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "继续",
+        Language::En => "Resume",
+    }
+}
+pub fn tr_btn_remove_selected(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "删除",
+        Language::En => "Delete",
+    }
+}
+pub fn tr_btn_copy_link(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "复制链接",
+        Language::En => "Copy link",
+    }
+}
+pub fn tr_btn_copy_links(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "复制链接",
+        Language::En => "Copy links",
+    }
+}
+pub fn tr_btn_copy_path(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "复制路径",
+        Language::En => "Copy path",
+    }
+}
+pub fn tr_btn_copy_error(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "复制错误",
+        Language::En => "Copy error",
+    }
+}
+pub fn tr_copied_to_clipboard(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "已复制到剪贴板",
+        Language::En => "Copied to clipboard",
+    }
+}
+pub fn tr_inspector_title(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "任务详情",
+        Language::En => "Task Details",
+    }
+}
+pub fn tr_detail_speed(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "下载速度",
+        Language::En => "Download speed",
+    }
+}
+pub fn tr_detail_threads(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "并发连接",
+        Language::En => "Connections",
+    }
+}
+pub fn tr_detail_threads_val(lang: Language, n: u32) -> String {
+    match lang {
+        Language::Zh => format!("{n} 线程"),
+        Language::En => format!("{n} threads"),
+    }
+}
+pub fn tr_detail_created(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "添加时间",
+        Language::En => "Added",
+    }
+}
+pub fn tr_detail_size(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "文件大小",
+        Language::En => "Size",
+    }
+}
+pub fn tr_detail_protocol(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "下载协议",
+        Language::En => "Protocol",
+    }
+}
+pub fn tr_detail_status(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "当前状态",
+        Language::En => "Status",
+    }
+}
+pub fn tr_detail_error(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "错误原因",
+        Language::En => "Error",
+    }
+}
+pub fn tr_detail_user_agent(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "User-Agent",
+        Language::En => "User-Agent",
+    }
+}
+pub fn tr_detail_referer(lang: Language) -> &'static str {
+    match lang {
+        Language::Zh => "引用来源",
+        Language::En => "Referer",
+    }
+}
+pub fn tr_confirm_remove_selected_title(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("删除选中的 {n} 个任务？"),
+        Language::En => format!("Delete {n} selected tasks?"),
+    }
+}
+pub fn tr_confirm_remove_selected_body(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("选中的 {n} 个任务将从列表中移除，对应文件将移入废纸篓。"),
+        Language::En => format!("Remove {n} tasks from the list and move their files to Trash."),
+    }
+}
+pub fn tr_status_paused_n(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已暂停 {n} 项任务"),
+        Language::En => format!("Paused {n} tasks"),
+    }
+}
+pub fn tr_status_resumed_n(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已继续 {n} 项任务"),
+        Language::En => format!("Resumed {n} tasks"),
+    }
+}
+pub fn tr_status_removed_n(lang: Language, n: usize) -> String {
+    match lang {
+        Language::Zh => format!("已删除 {n} 项任务"),
+        Language::En => format!("Removed {n} tasks"),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

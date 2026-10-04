@@ -1,13 +1,15 @@
 use crate::ui::components::buttons::{ghost_button, small_button};
-use crate::ui::components::scroll::{drag_capture, drag_to_offset, scroll_metrics, scrollbar, SCROLLBAR_W};
+use crate::ui::components::scroll::{
+    drag_capture, drag_to_offset, scroll_metrics, scrollbar, SCROLLBAR_W,
+};
 use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::Root;
-use gpui::{div, prelude::*, px, rgb, Context, IntoElement};
+use gpui::{div, prelude::*, px, rgb, Context, Div, IntoElement};
 
 pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
     const EST_VIEWPORT_H: f32 = 600.0;
-    const EST_CONTENT_H: f32 = 920.0;
+    const EST_CONTENT_H: f32 = 800.0;
     let lang = root.language;
     let folder = root.settings.save_dir.display().to_string();
     let conn = root.settings.connections_clamped();
@@ -29,7 +31,7 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
         .py_6()
         .flex()
         .flex_col()
-        .gap_6()
+        .gap_5()
         .child(
             div()
                 .text_xl()
@@ -37,136 +39,231 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
                 .text_color(rgb(TEXT))
                 .child(tr_view_settings(lang)),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(MUTED))
-                .child(tr_settings_blurb(lang)),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(MUTED))
-                .child(tr_settings_ext(lang)),
-        )
-        .child(row(
-            tr_settings_folder(lang),
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .child(folder),
-                )
-                .child(
+        // 1. 下载与存储
+        .child(section_card(
+            tr_settings_sec_download(lang),
+            vec![
+                setting_row(
+                    tr_settings_folder(lang),
+                    Some(folder),
                     ghost_button(tr_btn_browse(lang).into(), true)
                         .id("browse-dir")
                         .on_click(cx.listener(|this, _, _, cx| this.pick_save_dir(cx))),
+                    false,
                 ),
+                setting_row(
+                    tr_settings_conc(lang),
+                    None,
+                    stepper(
+                        conc,
+                        1,
+                        8,
+                        |this, v, cx| {
+                            this.settings.max_concurrent = v;
+                            this.settings.save();
+                            cx.notify();
+                        },
+                        cx,
+                    ),
+                    false,
+                ),
+                setting_row(
+                    tr_settings_conn(lang),
+                    None,
+                    stepper(
+                        conn,
+                        1,
+                        64,
+                        |this, v, cx| {
+                            this.settings.connections = v;
+                            this.settings.save();
+                            cx.notify();
+                        },
+                        cx,
+                    ),
+                    true,
+                ),
+            ],
         ))
-        .child(row(
-            tr_settings_conn(lang),
-            stepper(
-                conn,
-                1,
-                64,
-                |this, v, cx| {
-                    this.settings.connections = v;
-                    this.settings.save();
-                    cx.notify();
+        // 2. 网络与传输
+        .child(section_card(
+            tr_settings_sec_network(lang),
+            vec![
+                setting_row(
+                    tr_settings_limit(lang),
+                    Some(tr_settings_limit_sub(lang).to_string()),
+                    stepper(
+                        limit_kib,
+                        0,
+                        100_000,
+                        |this, v, cx| {
+                            this.settings.download_limit_bps = u64::from(v) * 1024;
+                            this.limiter.set_limit(this.settings.download_limit_bps);
+                            this.settings.save();
+                            cx.notify();
+                        },
+                        cx,
+                    ),
+                    false,
+                ),
+                setting_row(
+                    tr_settings_proxy(lang),
+                    Some(proxy.to_string()),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            ghost_button(tr_btn_paste(lang).into(), true)
+                                .id("proxy-paste")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.set_proxy_from_clipboard(cx)),
+                                ),
+                        )
+                        .child(
+                            ghost_button(
+                                tr_btn_clear(lang).into(),
+                                root.settings.proxy().is_some(),
+                            )
+                            .id("proxy-clear")
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_proxy(cx))),
+                        ),
+                    true,
+                ),
+            ],
+        ))
+        // 3. 常规与偏好
+        .child(section_card(
+            tr_settings_sec_general(lang),
+            vec![
+                {
+                    let on = root.settings.watch_clipboard;
+                    setting_row(
+                        tr_settings_clip(lang),
+                        Some(tr_settings_clip_sub(lang).to_string()),
+                        small_button(
+                            if on {
+                                tr_on(lang).into()
+                            } else {
+                                tr_off(lang).into()
+                            },
+                            if on { PRIMARY_FIXED } else { SURF },
+                            if on { PRIMARY } else { MUTED },
+                            true,
+                        )
+                        .id("clip-toggle")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.watch_clipboard = !this.settings.watch_clipboard;
+                            this.settings.save();
+                            cx.notify();
+                        })),
+                        false,
+                    )
                 },
-                cx,
-            ),
-        ))
-        .child(row(
-            tr_settings_conc(lang),
-            stepper(
-                conc,
-                1,
-                8,
-                |this, v, cx| {
-                    this.settings.max_concurrent = v;
-                    this.settings.save();
-                    cx.notify();
+                {
+                    let auto = root.settings.auto_check_updates;
+                    setting_row(
+                        tr_update_auto_check(lang),
+                        Some(tr_update_auto_check_sub(lang).to_string()),
+                        small_button(
+                            if auto {
+                                tr_on(lang).into()
+                            } else {
+                                tr_off(lang).into()
+                            },
+                            if auto { PRIMARY_FIXED } else { SURF },
+                            if auto { PRIMARY } else { MUTED },
+                            true,
+                        )
+                        .id("auto-update-toggle")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.auto_check_updates = !this.settings.auto_check_updates;
+                            this.settings.save();
+                            cx.notify();
+                        })),
+                        false,
+                    )
                 },
-                cx,
-            ),
+                setting_row(
+                    tr_settings_lang(lang),
+                    None,
+                    small_button(
+                        root.language.short_name().into(),
+                        PRIMARY_FIXED,
+                        PRIMARY,
+                        true,
+                    )
+                    .id("lang-settings")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_language(cx))),
+                    true,
+                ),
+            ],
         ))
-        .child(row(
-            tr_settings_limit(lang),
-            stepper(
-                limit_kib,
-                0,
-                100_000,
-                |this, v, cx| {
-                    this.settings.download_limit_bps = u64::from(v) * 1024;
-                    this.limiter.set_limit(this.settings.download_limit_bps);
-                    this.settings.save();
-                    cx.notify();
-                },
-                cx,
-            ),
-        ))
-        .child(row(
-            tr_settings_proxy(lang),
+        // 4. 关于与说明
+        .child(
             div()
+                .w_full()
+                .max_w(px(720.))
+                .p_3p5()
+                .rounded_xl()
+                .bg(rgb(SURF_LOW))
+                .border_1()
+                .border_color(rgba(OUTLINE_VAR, 0.45))
                 .flex()
-                .items_center()
-                .gap_3()
+                .flex_col()
+                .gap_2()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .child(proxy.to_string()),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(TEXT))
+                                        .child(tr_settings_sec_about(lang)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                ),
+                        )
+                        .child(
+                            ghost_button(
+                                if root.update.checking {
+                                    tr_update_checking(lang).into()
+                                } else {
+                                    tr_update_check(lang).into()
+                                },
+                                !root.update.checking,
+                            )
+                            .id("check-update-btn")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.check_for_updates_manual(cx);
+                            })),
+                        ),
                 )
                 .child(
-                    ghost_button(tr_btn_paste(lang).into(), true)
-                        .id("proxy-paste")
-                        .on_click(cx.listener(|this, _, _, cx| this.set_proxy_from_clipboard(cx))),
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(tr_settings_blurb(lang)),
                 )
                 .child(
-                    ghost_button(tr_btn_clear(lang).into(), root.settings.proxy().is_some())
-                        .id("proxy-clear")
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_proxy(cx))),
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(tr_settings_ext(lang)),
                 ),
-        ))
-        .child(row(tr_settings_clip(lang), {
-            let on = root.settings.watch_clipboard;
-            small_button(
-                if on {
-                    tr_on(lang).into()
-                } else {
-                    tr_off(lang).into()
-                },
-                if on { PRIMARY_FIXED } else { SURF },
-                if on { PRIMARY } else { MUTED },
-                true,
-            )
-            .id("clip-toggle")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings.watch_clipboard = !this.settings.watch_clipboard;
-                this.settings.save();
-                cx.notify();
-            }))
-        }))
-        .child(row(
-            tr_settings_lang(lang),
-            small_button(
-                root.language.short_name().into(),
-                PRIMARY_FIXED,
-                PRIMARY,
-                true,
-            )
-            .id("lang-settings")
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_language(cx))),
-        ));
+        );
 
     let scrollbar_el = metrics.map(|m| {
         scrollbar("settings-scroll-thumb", m, |thumb| {
@@ -206,28 +303,80 @@ pub fn render_settings_view(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
         ))
 }
 
-fn row(label: &str, right: impl IntoElement) -> impl IntoElement {
+fn section_card(title: &str, rows: Vec<Div>) -> impl IntoElement {
     div()
         .w_full()
         .max_w(px(720.))
-        .px_4()
-        .py_3()
-        .rounded_xl()
-        .bg(rgb(CARD))
-        .border_1()
-        .border_color(rgba(OUTLINE_VAR, 0.55))
         .flex()
-        .items_center()
-        .gap_4()
+        .flex_col()
+        .gap_1p5()
         .child(
             div()
-                .w(px(160.))
-                .flex_none()
-                .text_sm()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(MUTED))
-                .child(label.to_string()),
+                .px_1()
+                .child(title.to_string()),
         )
-        .child(div().flex_1().min_w(px(0.)).child(right))
+        .child(
+            div()
+                .w_full()
+                .rounded_xl()
+                .bg(rgb(CARD))
+                .border_1()
+                .border_color(rgba(OUTLINE_VAR, 0.5))
+                .overflow_hidden()
+                .children(rows),
+        )
+}
+
+fn setting_row(
+    label: &str,
+    subtitle: Option<String>,
+    right: impl IntoElement,
+    is_last: bool,
+) -> Div {
+    div()
+        .w_full()
+        .px_4()
+        .py_2p5()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .when(!is_last, |d| {
+            d.border_b_1().border_color(rgba(OUTLINE_VAR, 0.35))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgb(TEXT))
+                        .child(label.to_string()),
+                )
+                .children(subtitle.map(|sub| {
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .overflow_hidden()
+                        .child(sub)
+                })),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_end()
+                .child(right.into_any_element()),
+        )
 }
 
 fn stepper(
@@ -252,7 +401,8 @@ fn stepper(
         )
         .child(
             div()
-                .w(px(36.))
+                .min_w(px(36.))
+                .px_1()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(TEXT))

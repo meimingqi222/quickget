@@ -8,19 +8,20 @@
 //! 的下载节点就是）把 `0-0` 当成非法范围直接 404，浏览器正常 GET 却
 //! 能下。`0-1` 在这些机器上返回 206。
 
-use crate::core::io::{finalize_part, open_part, preallocate, write_at};
+use crate::core::io::{atomic_write, finalize_part, open_part, preallocate, write_at};
 use crate::core::limiter::DownloadLimiter;
 use crate::core::model::suggested_connections;
-use crate::core::progress::{Control, JobOutcome, LiveProgress};
+use crate::core::progress::{wait_interruptible, Control, JobOutcome, LiveProgress};
 use crate::core::urlx::filename_from_disposition;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BUF: usize = 256 * 1024;
 const RETRIES: u32 = 8;
@@ -66,11 +67,10 @@ pub fn build_client(ua: &str, proxy: Option<&str>) -> Result<Client, String> {
         .cookie_store(true)
         .default_headers(default_headers(ua));
     if let Some(proxy) = proxy {
-        builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理地址无效：{e}"))?);
+        builder =
+            builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理地址无效：{e}"))?);
     }
-    builder
-        .build()
-        .map_err(|e| e.to_string())
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn default_headers(ua: &str) -> HeaderMap {
@@ -113,15 +113,43 @@ pub struct HttpJob<'a> {
 }
 
 pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
+    if job.ctrl.interrupted() {
+        return JobOutcome::from_interrupt(
+            &job.ctrl,
+            job.progress.downloaded(),
+            job.progress.total(),
+        );
+    }
     let client = match build_client(job.ua, job.proxy) {
         Ok(c) => c,
         Err(e) => return JobOutcome::Failed(e),
     };
 
-    let info = match probe_remote(&client, job.url, job.referer, job.cookies) {
+    let Some(_probe_permit) = crate::core::budget::acquire_network_worker(&job.ctrl) else {
+        return JobOutcome::from_interrupt(
+            &job.ctrl,
+            job.progress.downloaded(),
+            job.progress.total(),
+        );
+    };
+    let info = match probe_remote_with_control(
+        &client,
+        job.url,
+        job.referer,
+        job.cookies,
+        Some(&job.ctrl),
+    ) {
         Ok(i) => i,
+        Err(e) if job.ctrl.interrupted() => {
+            return JobOutcome::from_interrupt(
+                &job.ctrl,
+                job.progress.downloaded(),
+                job.progress.total(),
+            );
+        }
         Err(e) => return JobOutcome::Failed(e),
     };
+    drop(_probe_permit);
 
     let mut dest = job.dest.to_path_buf();
     let mut part = job.part.to_path_buf();
@@ -160,6 +188,7 @@ pub fn download_http(job: HttpJob<'_>) -> JobOutcome {
     }
 }
 
+#[derive(Debug)]
 pub struct RemoteInfo {
     pub final_url: String,
     pub size: u64,
@@ -200,24 +229,77 @@ pub fn probe_remote(
     referer: Option<&str>,
     cookies: Option<&str>,
 ) -> Result<RemoteInfo, String> {
-    let timeout = Duration::from_secs(20);
+    probe_remote_with_control(client, url, referer, cookies, None)
+}
 
-    let range_req = attach_auth(
-        client
-            .get(url)
-            .header("Range", "bytes=0-1")
-            .header("Accept-Encoding", "identity")
-            .timeout(timeout),
-        referer,
-        cookies,
-    );
-    let range_resp = range_req.send().map_err(|e| e.to_string())?;
-    let range_code = range_resp.status().as_u16();
-    if range_code == 206 || range_resp.status().is_success() {
-        return Ok(info_from_response(&range_resp, true));
+pub fn format_reqwest_error(e: &reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        let s_str = s.to_string();
+        if !msg.contains(&s_str) {
+            msg.push_str(&format!(": {s_str}"));
+        }
+        source = s.source();
     }
-    drop(range_resp);
+    msg
+}
 
+fn probe_remote_with_control(
+    client: &Client,
+    url: &str,
+    referer: Option<&str>,
+    cookies: Option<&str>,
+    ctrl: Option<&Control>,
+) -> Result<RemoteInfo, String> {
+    let timeout = Duration::from_secs(20);
+    let interrupted = || ctrl.is_some_and(Control::interrupted);
+    let stopped = || Err::<RemoteInfo, String>("下载已暂停或取消".into());
+
+    let mut last_err = String::new();
+    // 探测阶段给予 3 次瞬时网络重试，避免因本地代理握手延迟、DNS 刷新或 CDN 节点瞬时连接重置导致任务直接失败
+    for attempt in 0..3 {
+        if interrupted() {
+            return stopped();
+        }
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(400 * attempt as u64));
+        }
+
+        let range_req = attach_auth(
+            client
+                .get(url)
+                .header("Range", "bytes=0-1")
+                .header("Accept-Encoding", "identity")
+                .timeout(timeout),
+            referer,
+            cookies,
+        );
+        match range_req.send() {
+            Ok(range_resp) => {
+                if interrupted() {
+                    return stopped();
+                }
+                let range_code = range_resp.status().as_u16();
+                if range_code == 206 || range_resp.status().is_success() {
+                    return Ok(info_from_response(&range_resp, true));
+                }
+                // 非网络连接错误（如 403/404 等服务端业务状态），不用重试 Range，继续尝试 HEAD / GET
+                break;
+            }
+            Err(e) => {
+                last_err = format_reqwest_error(&e);
+                crate::core::log::write(format_args!(
+                    "HTTP 探测 Range 第 {} 次网络失败：{last_err}",
+                    attempt + 1
+                ));
+            }
+        }
+    }
+
+    if interrupted() {
+        return stopped();
+    }
     let head_req = attach_auth(
         client
             .head(url)
@@ -227,11 +309,19 @@ pub fn probe_remote(
         cookies,
     );
     if let Ok(head_resp) = head_req.send() {
+        if interrupted() {
+            return stopped();
+        }
         if head_resp.status().is_success() {
             return Ok(info_from_response(&head_resp, false));
         }
+    } else if interrupted() {
+        return stopped();
     }
 
+    if interrupted() {
+        return stopped();
+    }
     let get_req = attach_auth(
         client
             .get(url)
@@ -240,7 +330,17 @@ pub fn probe_remote(
         referer,
         cookies,
     );
-    let get_resp = get_req.send().map_err(|e| e.to_string())?;
+    let get_resp = get_req.send().map_err(|e| {
+        let detailed = format_reqwest_error(&e);
+        if !last_err.is_empty() {
+            format!("{detailed}（初次连接错误：{last_err}）")
+        } else {
+            detailed
+        }
+    })?;
+    if interrupted() {
+        return stopped();
+    }
     if !get_resp.status().is_success() {
         return Err(format!("HTTP {}", get_resp.status()));
     }
@@ -356,23 +456,29 @@ fn retarget_dest(
     let new_dest = dir.join(clean);
     let (new_part, new_meta) = sidecar_paths(&new_dest);
     if part.exists() {
-        if new_part != part && !new_part.exists() {
-            let _ = std::fs::rename(&part, &new_part);
-        }
-        if meta.exists() && new_meta != meta && !new_meta.exists() {
-            let _ = std::fs::rename(&meta, &new_meta);
-        }
-        let dest_out = if new_part.exists() || part.exists() {
-            if new_part.exists() {
-                new_dest
-            } else {
-                dest
+        // The part and its sidecar are one resume record. Only switch to the
+        // new basename after both moves succeed; otherwise keep the old pair.
+        let has_meta = meta.exists();
+        let can_move_part = new_part == part || !new_part.exists();
+        let can_move_meta = !has_meta || new_meta == meta || !new_meta.exists();
+        if can_move_part && can_move_meta {
+            let moved_part = new_part == part || std::fs::rename(&part, &new_part).is_ok();
+            let moved_meta =
+                !has_meta || new_meta == meta || std::fs::rename(&meta, &new_meta).is_ok();
+            if moved_part && moved_meta {
+                let (p, m) = sidecar_paths(&new_dest);
+                return (new_dest, p, m);
             }
-        } else {
-            new_dest
-        };
-        let (p, m) = sidecar_paths(&dest_out);
-        return (dest_out, p, m);
+            // Best-effort rollback if the second move failed. Never delete a
+            // pre-existing destination sidecar or part.
+            if moved_part && new_part != part && !part.exists() {
+                let _ = std::fs::rename(&new_part, &part);
+            }
+            if moved_meta && has_meta && new_meta != meta && !meta.exists() {
+                let _ = std::fs::rename(&new_meta, &meta);
+            }
+        }
+        return (dest, part, meta);
     }
     let (_, path) = crate::core::urlx::unique_path(dir, clean);
     let (p, m) = sidecar_paths(&path);
@@ -413,9 +519,61 @@ fn load_resume(
     Some(meta)
 }
 
-fn save_resume(path: &Path, meta: &ResumeMeta) {
-    if let Ok(text) = serde_json::to_string(meta) {
-        let _ = std::fs::write(path, text);
+const RESUME_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Resume 元数据由多个 range worker 共同更新。串行化并采用临时文件 + rename，
+/// 避免 worker 同时写同一个 JSON 时产生截断文件；非强制保存按时间节流，
+/// 防止大量小 Range 把下载线程拖进元数据 I/O。
+struct ResumeWriter {
+    path: PathBuf,
+    state: Mutex<ResumeWriterState>,
+}
+
+struct ResumeWriterState {
+    last_save: Option<Instant>,
+    saving: bool,
+}
+
+impl ResumeWriter {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            state: Mutex::new(ResumeWriterState {
+                last_save: None,
+                saving: false,
+            }),
+        }
+    }
+
+    /// Build and persist a checkpoint only when the interval has elapsed.
+    /// The builder is deliberately lazy: throttled calls do not snapshot or serialize.
+    fn save_with<F>(&self, force: bool, build: F) -> bool
+    where
+        F: FnOnce() -> ResumeMeta,
+    {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.saving
+                || (!force
+                    && state
+                        .last_save
+                        .is_some_and(|at| at.elapsed() < RESUME_SAVE_INTERVAL))
+            {
+                return false;
+            }
+            state.saving = true;
+        }
+
+        let result = serde_json::to_vec(&build())
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|text| atomic_write(&self.path, &text));
+        let ok = result.is_ok();
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.saving = false;
+        if ok {
+            state.last_save = Some(Instant::now());
+        }
+        ok
     }
 }
 
@@ -449,15 +607,29 @@ fn unread(part: &LivePart) -> u64 {
 fn snapshot_parts(pool: &[Arc<LivePart>]) -> Vec<PartMeta> {
     let mut v: Vec<PartMeta> = pool
         .iter()
-        .map(|p| PartMeta {
-            start: p.start,
-            end: p.end.load(Ordering::Relaxed),
-            done: p.written.load(Ordering::Relaxed),
+        .filter_map(|p| {
+            let end = p.end.load(Ordering::Acquire);
+            let done = p
+                .written
+                .load(Ordering::Acquire)
+                .min(part_len(p.start, end));
+            (end >= p.start).then_some(PartMeta {
+                start: p.start,
+                end,
+                done,
+            })
         })
-        .filter(|p| p.end >= p.start)
         .collect();
     v.sort_by_key(|p| p.start);
     v
+}
+
+fn snapshot_pool(pool: &Mutex<Vec<Arc<LivePart>>>) -> Vec<PartMeta> {
+    let parts = {
+        let guard = lock_pool(pool);
+        guard.clone()
+    };
+    snapshot_parts(&parts)
 }
 
 fn lock_pool(pool: &Mutex<Vec<Arc<LivePart>>>) -> std::sync::MutexGuard<'_, Vec<Arc<LivePart>>> {
@@ -587,7 +759,8 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
             })
         })
         .collect();
-    let worker_n = n.max(1) as usize;
+    let unfinished = live.iter().filter(|part| unread(part) > 0).count() as u32;
+    let worker_n = n.min(unfinished.max(1)) as usize;
     let mut initials: Vec<Option<Arc<LivePart>>> = vec![None; worker_n];
     let mut k = 0usize;
     for p in &live {
@@ -603,8 +776,14 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
     }
 
     let pool = Arc::new(Mutex::new(live));
+    let resume = Arc::new(ResumeWriter::new(job.meta_path));
     std::thread::scope(|scope| {
         for assigned in initials {
+            // 在创建线程前取得 permit。这样全局预算不足时，调用线程等待，
+            // 而不是先创建一批互相阻塞的网络线程。
+            let Some(permit) = crate::core::budget::acquire_network_worker(&job.ctrl) else {
+                break;
+            };
             let client = client.clone();
             let url = job.url.to_string();
             let part_path = job.part.to_path_buf();
@@ -613,14 +792,13 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
             let referer = job.referer.map(|s| s.to_string());
             let cookies = job.cookies.map(|s| s.to_string());
             let pool = pool.clone();
-            let meta_path = job.meta_path.to_path_buf();
+            let resume = resume.clone();
             let job_url = job.url.to_string();
             let etag = info.etag.clone();
             let size = info.size;
+            let limiter = job.limiter.clone();
             scope.spawn(move || {
-                let Some(_permit) = crate::core::budget::acquire_network_worker(&ctrl) else {
-                    return;
-                };
+                let _permit = permit;
                 range_worker(
                     &client,
                     &url,
@@ -631,32 +809,28 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
                     &progress,
                     &ctrl,
                     &pool,
-                    &meta_path,
+                    &resume,
                     &job_url,
                     etag.as_deref(),
                     size,
-                    &job.limiter,
+                    &limiter,
                 );
             });
         }
     });
 
-    let snap = snapshot_parts(&lock_pool(&pool));
-    save_resume(
-        job.meta_path,
-        &ResumeMeta {
-            url: job.url.to_string(),
-            size: info.size,
-            etag: info.etag.clone(),
-            parts: snap.clone(),
-        },
-    );
+    let snap = snapshot_pool(&pool);
+    let complete = snap.iter().all(|p| p.done >= part_len(p.start, p.end));
+    resume.save_with(true, || ResumeMeta {
+        url: job.url.to_string(),
+        size: info.size,
+        etag: info.etag.clone(),
+        parts: snap,
+    });
 
     if job.ctrl.interrupted() {
         return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), info.size);
     }
-
-    let complete = snap.iter().all(|p| p.done >= part_len(p.start, p.end));
     if complete {
         finish_ok(job, info.size)
     } else {
@@ -666,21 +840,18 @@ fn multi_range(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutc
 
 fn persist_pool(
     pool: &Mutex<Vec<Arc<LivePart>>>,
-    meta_path: &Path,
+    resume: &ResumeWriter,
     url: &str,
     etag: Option<&str>,
     size: u64,
+    force: bool,
 ) {
-    let snap = snapshot_parts(&lock_pool(pool));
-    save_resume(
-        meta_path,
-        &ResumeMeta {
-            url: url.to_string(),
-            size,
-            etag: etag.map(|s| s.to_string()),
-            parts: snap,
-        },
-    );
+    resume.save_with(force, || ResumeMeta {
+        url: url.to_string(),
+        size,
+        etag: etag.map(str::to_string),
+        parts: snapshot_pool(pool),
+    });
 }
 
 fn range_worker(
@@ -693,12 +864,22 @@ fn range_worker(
     progress: &LiveProgress,
     ctrl: &Control,
     pool: &Mutex<Vec<Arc<LivePart>>>,
-    meta_path: &Path,
+    resume: &ResumeWriter,
     job_url: &str,
     etag: Option<&str>,
     size: u64,
     limiter: &DownloadLimiter,
 ) {
+    // 每个 worker 只打开一次 .part，并复用 256 KiB 缓冲区；此前每个 4 MiB
+    // Range 都会重复 open 文件和分配 Vec，短 Range/高速 SSD 下开销很明显。
+    let mut file = match open_part(part_path) {
+        Ok(file) => file,
+        Err(e) => {
+            crate::core::log::write(format_args!("打开分段文件失败：{e}"));
+            return;
+        }
+    };
+    let mut buf = vec![0u8; BUF];
     loop {
         if ctrl.interrupted() {
             return;
@@ -706,24 +887,24 @@ fn range_worker(
         let part = match assigned.take() {
             Some(p) => p,
             None => match take_work(pool) {
-                Some(p) => {
-                    persist_pool(pool, meta_path, job_url, etag, size);
-                    p
-                }
+                Some(p) => p,
                 None => return,
             },
         };
         download_part(
-            client, url, part_path, &part, referer, cookies, progress, ctrl, limiter,
+            client, url, &mut file, &mut buf, &part, referer, cookies, progress, ctrl, limiter,
         );
         part.busy.store(false, Ordering::Release);
+        // 节流后的快照不会阻塞每个 Range；循环结束前的强制保存由调用方完成。
+        persist_pool(pool, resume, job_url, etag, size, false);
     }
 }
 
 fn download_part(
     client: &Client,
     url: &str,
-    part_path: &Path,
+    file: &mut File,
+    buf: &mut [u8],
     part: &LivePart,
     referer: Option<&str>,
     cookies: Option<&str>,
@@ -745,7 +926,7 @@ fn download_part(
         }
         let window_end = pos.saturating_add(HTTP_WINDOW.saturating_sub(1)).min(end);
         match fetch_range(
-            client, url, part_path, pos, window_end, part, referer, cookies, progress, ctrl,
+            client, url, file, buf, pos, window_end, part, referer, cookies, progress, ctrl,
             limiter,
         ) {
             Ok(()) => {
@@ -756,7 +937,9 @@ fn download_part(
                 if attempt > RETRIES {
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(200 * attempt as u64));
+                if wait_interruptible(ctrl, Duration::from_millis(200 * attempt as u64)) {
+                    return;
+                }
             }
         }
     }
@@ -765,7 +948,8 @@ fn download_part(
 fn fetch_range(
     client: &Client,
     url: &str,
-    part_path: &Path,
+    file: &mut File,
+    buf: &mut [u8],
     from: u64,
     req_end: u64,
     part: &LivePart,
@@ -798,8 +982,6 @@ fn fetch_range(
     if code != 206 && code != 200 {
         return Err(format!("HTTP {code}"));
     }
-    let mut file = open_part(part_path).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; BUF];
     let mut offset = from;
     let mut got_any = false;
     loop {
@@ -825,7 +1007,7 @@ fn fetch_range(
         if use_n == 0 {
             break;
         }
-        write_at(&mut file, offset, &buf[..use_n as usize]).map_err(|e| e.to_string())?;
+        write_at(file, offset, &buf[..use_n as usize]).map_err(|e| e.to_string())?;
         offset += use_n;
         got_any = true;
         part.written
@@ -845,6 +1027,9 @@ fn fetch_range(
 }
 
 fn single_stream(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOutcome {
+    let Some(_permit) = crate::core::budget::acquire_network_worker(&job.ctrl) else {
+        return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), info.size);
+    };
     let resume_from = job
         .part
         .exists()
@@ -860,7 +1045,13 @@ fn single_stream(client: &Client, job: &HttpJob<'_>, info: &RemoteInfo) -> JobOu
             .store(resume_from, Ordering::Relaxed);
     }
 
-    let mut req = client.get(job.url).header("Accept-Encoding", "identity");
+    if job.ctrl.interrupted() {
+        return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), info.size);
+    }
+    let mut req = client
+        .get(job.url)
+        .header("Accept-Encoding", "identity")
+        .timeout(RANGE_TIMEOUT);
     if resume_from > 0 && info.ranges {
         req = req.header("Range", format!("bytes={resume_from}-"));
     }
@@ -924,6 +1115,9 @@ fn finish_ok(job: &HttpJob<'_>, size: u64) -> JobOutcome {
     if let Err(e) = crate::core::verify::verify_finished(job.part, size, name) {
         crate::core::log::write(format_args!("成品校验失败：{e}"));
         return JobOutcome::Failed(e);
+    }
+    if job.ctrl.interrupted() {
+        return JobOutcome::from_interrupt(&job.ctrl, job.progress.downloaded(), size);
     }
     if let Err(e) = finalize_part(job.part, job.dest) {
         return JobOutcome::Failed(e.to_string());
@@ -1088,5 +1282,34 @@ mod tests {
         let got = take_work(&pool).unwrap();
         assert!(Arc::ptr_eq(&got, &idle));
         assert!(idle.busy.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn throttled_resume_save_does_not_build_metadata() {
+        let dir = std::env::temp_dir().join(format!("qg-writer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = ResumeWriter::new(&dir.join("resume.json"));
+        let builds = std::sync::atomic::AtomicUsize::new(0);
+        assert!(writer.save_with(false, || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            ResumeMeta {
+                url: "https://example.invalid".into(),
+                size: 1,
+                etag: None,
+                parts: Vec::new(),
+            }
+        }));
+        assert_eq!(builds.load(Ordering::Relaxed), 1);
+        assert!(!writer.save_with(false, || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            ResumeMeta {
+                url: "https://example.invalid".into(),
+                size: 1,
+                etag: None,
+                parts: Vec::new(),
+            }
+        }));
+        assert_eq!(builds.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

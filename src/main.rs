@@ -75,7 +75,7 @@ fn main() {
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
-        let bounds = Bounds::centered(None, size(px(980.), px(680.)), cx);
+        let bounds = Bounds::centered(None, size(px(1040.), px(680.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

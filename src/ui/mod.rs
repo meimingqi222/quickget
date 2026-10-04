@@ -5,9 +5,11 @@ pub mod i18n;
 pub mod state;
 pub mod text_input;
 pub mod theme;
+pub mod updater;
 pub mod views;
 
 pub use state::*;
+pub use updater::*;
 
 use crate::core::capture::CaptureJob;
 use crate::core::engine::run_task;
@@ -25,7 +27,7 @@ use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::views::{render_settings_view, render_tasks_view};
 use gpui::{
-    div, prelude::*, px, rgb, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render,
+    div, prelude::*, px, rgb, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render,
     ScrollHandle, Task as GpuiTask, Window,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,6 +58,10 @@ pub struct Root {
     pub cursor_blink_task: Option<GpuiTask<()>>,
     pub cursor_blink_wanted: bool,
     pub expanded_task: Option<String>,
+    pub selected_tasks: std::collections::HashSet<String>,
+    pub inspector_task: Option<String>,
+    pub inspector_scroll: ScrollHandle,
+    pub inspector_scroll_drag: Option<(f32, f32)>,
     pub settings_scroll: ScrollHandle,
     pub settings_scroll_drag: Option<(f32, f32)>,
     pub detail_scroll: ScrollHandle,
@@ -68,10 +74,12 @@ pub struct Root {
     capture_flush_gen: u64,
     /// 网盘直链解析中的后台任务句柄，保持存活用。
     netdisk_tasks: Vec<GpuiTask<()>>,
+    pub update: UpdateState,
 }
 
 pub enum PendingConfirm {
     RemoveTask { id: String, filename: String },
+    RemoveSelectedTasks { ids: Vec<String>, count: usize },
     ClearDone { count: usize },
     AddUrls { urls: Vec<String> },
     AddCaptures { jobs: Vec<CaptureJob> },
@@ -108,6 +116,10 @@ impl Root {
             cursor_blink_task: None,
             cursor_blink_wanted: false,
             expanded_task: None,
+            selected_tasks: std::collections::HashSet::new(),
+            inspector_task: None,
+            inspector_scroll: ScrollHandle::new(),
+            inspector_scroll_drag: None,
             settings_scroll: ScrollHandle::new(),
             settings_scroll_drag: None,
             detail_scroll: ScrollHandle::new(),
@@ -118,6 +130,7 @@ impl Root {
             capture_flush_task: None,
             capture_flush_gen: 0,
             netdisk_tasks: Vec::new(),
+            update: UpdateState::default(),
         };
         crate::core::capture::write_pid();
         crate::core::capture::install_native_host();
@@ -127,6 +140,7 @@ impl Root {
         root.start_inbox_watch(cx);
         root.retry_pending_transfer_cleanups(cx);
         root.pump_queue(cx);
+        root.start_update_scheduler(cx);
         root
     }
 
@@ -1065,6 +1079,9 @@ impl Root {
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
         match self.pending_confirm.take() {
             Some(PendingConfirm::RemoveTask { id, .. }) => self.remove_task(&id, cx),
+            Some(PendingConfirm::RemoveSelectedTasks { ids, .. }) => {
+                self.remove_multiple_tasks(&ids, cx)
+            }
             Some(PendingConfirm::ClearDone { .. }) => self.clear_done(cx),
             Some(PendingConfirm::AddUrls { urls }) => {
                 self.commit_urls(urls, cx);
@@ -1088,8 +1105,12 @@ impl Root {
         let live_meta = self.runtime.get(id).map(|s| s.meta.clone());
         let wait_for_stop = self.runtime.get(id).is_some();
         self.tasks.retain(|t| t.id != id);
+        self.selected_tasks.remove(id);
         if self.expanded_task.as_deref() == Some(id) {
             self.expanded_task = None;
+        }
+        if self.inspector_task.as_deref() == Some(id) {
+            self.inspector_task = None;
         }
         self.status = bilingual(|l| tr_status_trashed(l));
         self.persist();
@@ -1158,8 +1179,171 @@ impl Root {
         for (paths, cookies) in cleanups {
             self.schedule_orphan_transfer_cleanup(paths, cookies, cx);
         }
+        let done_ids: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Completed)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in &done_ids {
+            self.selected_tasks.remove(id);
+            if self.inspector_task.as_deref() == Some(id) {
+                self.inspector_task = None;
+            }
+        }
         self.tasks.retain(|t| t.status != TaskStatus::Completed);
         self.persist();
+        cx.notify();
+    }
+
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.selected_tasks.contains(id)
+    }
+
+    pub fn toggle_select_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.selected_tasks.contains(id) {
+            self.selected_tasks.remove(id);
+        } else {
+            self.selected_tasks.insert(id.to_string());
+        }
+        cx.notify();
+    }
+
+    pub fn select_all_visible(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for id in ids {
+            self.selected_tasks.insert(id.clone());
+        }
+        cx.notify();
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected_tasks.clear();
+        cx.notify();
+    }
+
+    pub fn toggle_select_all_visible(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let all_selected = ids.iter().all(|id| self.selected_tasks.contains(id));
+        if all_selected {
+            for id in ids {
+                self.selected_tasks.remove(id);
+            }
+        } else {
+            for id in ids {
+                self.selected_tasks.insert(id.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn pause_selected(&mut self, cx: &mut Context<Self>) {
+        let selected: Vec<String> = self.selected_tasks.iter().cloned().collect();
+        let mut n = 0usize;
+        for id in &selected {
+            if let Some(t) = self.tasks.iter_mut().find(|t| &t.id == id) {
+                if t.status == TaskStatus::Queued {
+                    t.status = TaskStatus::Paused;
+                    n += 1;
+                } else if t.status.is_active() {
+                    self.runtime.pause(id);
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.persist();
+            self.status = bilingual(move |l| tr_status_paused_n(l, n));
+        }
+        cx.notify();
+    }
+
+    pub fn resume_selected(&mut self, cx: &mut Context<Self>) {
+        let selected: Vec<String> = self.selected_tasks.iter().cloned().collect();
+        let mut n = 0usize;
+        for id in &selected {
+            if let Some(t) = self.tasks.iter_mut().find(|t| &t.id == id) {
+                if matches!(
+                    t.status,
+                    TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    t.status = TaskStatus::Queued;
+                    t.error = None;
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.persist();
+            self.pump_queue(cx);
+            self.status = bilingual(move |l| tr_status_resumed_n(l, n));
+        }
+        cx.notify();
+    }
+
+    pub fn request_remove_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.selected_tasks.iter().cloned().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        self.pending_confirm = Some(PendingConfirm::RemoveSelectedTasks { ids, count });
+        self.confirm_focus.focus(window);
+        cx.notify();
+    }
+
+    pub fn remove_multiple_tasks(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        let count = ids.len();
+        for id in ids {
+            self.remove_task(id, cx);
+        }
+        self.selected_tasks.clear();
+        self.status = bilingual(move |l| tr_status_removed_n(l, count));
+        cx.notify();
+    }
+
+    pub fn copy_selected_urls(&mut self, cx: &mut Context<Self>) {
+        let urls: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| self.selected_tasks.contains(&t.id))
+            .map(|t| t.url.clone())
+            .collect();
+        if urls.is_empty() {
+            return;
+        }
+        let count = urls.len();
+        let text = urls.join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.status = bilingual(move |l| {
+            if l == Language::Zh {
+                format!("已复制 {count} 条链接到剪贴板")
+            } else {
+                format!("Copied {count} URLs to clipboard")
+            }
+        });
+        cx.notify();
+    }
+
+    pub fn copy_text(&mut self, text: String, notice: &'static str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.status = bilingual(move |_| notice.to_string());
+        cx.notify();
+    }
+
+    pub fn toggle_inspector(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.inspector_task.as_deref() == Some(id) {
+            self.inspector_task = None;
+        } else {
+            self.inspector_task = Some(id.to_string());
+            self.inspector_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        }
+        cx.notify();
+    }
+
+    pub fn close_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector_task = None;
         cx.notify();
     }
 
@@ -1440,7 +1624,17 @@ impl Render for Root {
             );
         }
 
-        main = main.child(div().flex_1().min_h(px(0.)).flex().child(content));
+        main = main.child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .w_full()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(content),
+        );
 
         div()
             .size_full()
@@ -1455,6 +1649,9 @@ impl Render for Root {
                 div()
                     .flex_1()
                     .min_h(px(0.))
+                    .min_w(px(0.))
+                    .w_full()
+                    .overflow_hidden()
                     .flex()
                     .child(render_sidebar(self, cx))
                     .child(main),
@@ -1475,6 +1672,9 @@ impl Render for Root {
             .when(self.pending_confirm.is_some(), |d| {
                 d.child(render_confirm_overlay(self, cx))
             })
+            .when(self.update.show_dialog, |d| {
+                d.child(crate::ui::views::render_update_dialog(self, cx))
+            })
     }
 }
 
@@ -1484,6 +1684,14 @@ fn render_confirm_overlay(root: &Root, cx: &mut Context<Root>) -> impl IntoEleme
         Some(PendingConfirm::RemoveTask { filename, .. }) => (
             tr_confirm_delete_title(lang).to_string(),
             tr_confirm_delete_body(lang, &truncate(filename, 48)),
+            tr_confirm_delete_action(lang).to_string(),
+            true,
+            Vec::new(),
+            0usize,
+        ),
+        Some(PendingConfirm::RemoveSelectedTasks { count, .. }) => (
+            tr_confirm_remove_selected_title(lang, *count),
+            tr_confirm_remove_selected_body(lang, *count),
             tr_confirm_delete_action(lang).to_string(),
             true,
             Vec::new(),
@@ -1746,5 +1954,26 @@ mod tests {
             &["https://example.com/active.bin".into()]
         ));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn selection_helpers_work() {
+        let mut set = std::collections::HashSet::new();
+        set.insert("task-1".to_string());
+        set.insert("task-2".to_string());
+
+        let visible = vec!["task-1".to_string(), "task-2".to_string()];
+        let all_selected = visible.iter().all(|id| set.contains(id));
+        assert!(all_selected);
+
+        for id in &visible {
+            set.remove(id);
+        }
+        assert!(set.is_empty());
+
+        for id in &visible {
+            set.insert(id.clone());
+        }
+        assert_eq!(set.len(), 2);
     }
 }

@@ -232,9 +232,26 @@ impl Task {
     }
 
     pub fn elapsed_secs(&self) -> Option<u64> {
-        let start = self.started_at?;
+        let start = self.started_at.or(if self.created_at > 0 {
+            Some(self.created_at)
+        } else {
+            None
+        })?;
         let end = self.finished_at?;
-        Some(end.saturating_sub(start) as u64)
+        Some((end.saturating_sub(start) as u64).max(1))
+    }
+
+    pub fn average_speed(&self) -> Option<u64> {
+        let elapsed = self.elapsed_secs()?;
+        let bytes = if self.size > 0 {
+            self.size
+        } else {
+            self.downloaded
+        };
+        if bytes == 0 {
+            return None;
+        }
+        Some(bytes / elapsed.max(1))
     }
 
     /// 详情面板用的文件列表。BT 用种子清单；其它协议就是目标文件本身。

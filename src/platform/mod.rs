@@ -55,3 +55,26 @@ pub fn move_to_trash(path: &std::path::Path) -> Result<(), String> {
     }
     Err("当前平台没有回收站".into())
 }
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn is_packaged_install() -> bool {
+    false
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn update_cache_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("QuickGet").join("update-cache"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn cleanup_previous_update_leftovers() {}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn apply_update_and_restart(_payload: &std::path::Path) -> Result<(), String> {
+    Err("当前平台不支持自动更新".into())
+}

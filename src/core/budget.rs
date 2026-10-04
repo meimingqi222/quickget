@@ -1,9 +1,11 @@
 //! 进程级网络 worker 预算，防止多个任务各自开满连接而争抢资源。
 
 use crate::core::progress::Control;
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::OnceLock;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+
+const WAIT_SLICE: Duration = Duration::from_millis(25);
 
 #[derive(Clone)]
 pub struct WorkerBudget {
@@ -40,7 +42,7 @@ impl WorkerBudget {
             let (next, _) = self
                 .inner
                 .available
-                .wait_timeout(active, Duration::from_millis(100))
+                .wait_timeout(active, WAIT_SLICE)
                 .unwrap_or_else(|p| p.into_inner());
             active = next;
         }
@@ -83,5 +85,18 @@ mod tests {
         let permit = budget.acquire(&ctrl).unwrap();
         drop(permit);
         assert!(budget.acquire(&ctrl).is_some());
+    }
+
+    #[test]
+    fn interrupted_wait_returns_without_a_permit() {
+        let budget = WorkerBudget::new(1);
+        let held = budget.acquire(&Control::new()).unwrap();
+        let ctrl = Control::new();
+        let stop = ctrl.stop.clone();
+        let waiting = std::thread::spawn(move || budget.acquire(&ctrl));
+        std::thread::sleep(Duration::from_millis(20));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(waiting.join().unwrap().is_none());
+        drop(held);
     }
 }

@@ -145,3 +145,52 @@ pub fn icon_link(fg: u32, size: f32) -> AnyElement {
         )
         .into_any_element()
 }
+
+pub fn icon_close(fg: u32, size: f32) -> AnyElement {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(fg))
+                .child("✕"),
+        )
+        .into_any_element()
+}
+
+pub fn checkbox(checked: bool) -> AnyElement {
+    if checked {
+        div()
+            .w(px(16.))
+            .h(px(16.))
+            .rounded(px(4.))
+            .bg(rgb(PRIMARY))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(ON_PRIMARY))
+                    .child("✓"),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .w(px(16.))
+            .h(px(16.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgb(OUTLINE_VAR))
+            .bg(rgb(CARD))
+            .hover(|h| h.border_color(rgb(PRIMARY)))
+            .into_any_element()
+    }
+}
+

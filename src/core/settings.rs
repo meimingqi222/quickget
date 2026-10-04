@@ -24,6 +24,19 @@ pub struct Settings {
     pub user_agent: String,
     /// 剪贴板出现新链接时是否提示。
     pub watch_clipboard: bool,
+    /// 自动检查更新。
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    /// 用户选择跳过的版本。
+    #[serde(default)]
+    pub skipped_update_version: Option<String>,
+    /// 上次检查更新的时间戳（秒）。
+    #[serde(default)]
+    pub last_update_check_at: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -37,6 +50,9 @@ impl Default for Settings {
             proxy_url: String::new(),
             user_agent: default_ua().into(),
             watch_clipboard: true,
+            auto_check_updates: true,
+            skipped_update_version: None,
+            last_update_check_at: None,
         }
     }
 }

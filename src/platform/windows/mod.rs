@@ -135,3 +135,6 @@ pub fn register_native_host(json_path: &Path) {
         }
     }
 }
+
+pub mod updater;
+pub use updater::*;

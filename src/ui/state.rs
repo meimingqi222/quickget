@@ -143,6 +143,14 @@ impl RuntimeMap {
         }
     }
 
+    pub fn stop_all(&self) {
+        for s in self.inner.values() {
+            s.ctrl
+                .stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub fn active_count(&self) -> usize {
         self.inner.len()
     }

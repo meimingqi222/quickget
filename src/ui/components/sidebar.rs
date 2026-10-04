@@ -137,20 +137,55 @@ pub fn render_sidebar(root: &Root, cx: &mut Context<Root>) -> impl IntoElement {
         .child(nav_item(View::Settings, 0, cx))
         .child(
             div()
-                .id("lang-toggle")
                 .mt_2()
-                .h(px(32.))
-                .rounded_full()
-                .bg(rgb(SURF))
+                .px_1()
                 .flex()
                 .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|h| h.bg(rgb(SURF_HIGH)))
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(MUTED))
-                .child(root.language.short_name().to_string())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_language(cx))),
+                .justify_between()
+                .child(
+                    div()
+                        .id("sidebar-version-badge")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor_pointer()
+                        .hover(|h| h.opacity(0.8))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_update_dialog(cx);
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                        )
+                        .when(root.update.status.wants_attention(), |d| {
+                            d.child(
+                                div()
+                                    .w(px(6.))
+                                    .h(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(PRIMARY)),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .id("lang-toggle")
+                        .px_2()
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(rgb(SURF))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|h| h.bg(rgb(SURF_HIGH)))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(MUTED))
+                        .child(root.language.short_name().to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_language(cx))),
+                ),
         )
 }

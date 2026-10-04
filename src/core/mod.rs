@@ -19,6 +19,7 @@ pub mod progress;
 pub mod providers;
 pub mod settings;
 pub mod store;
+pub mod updater;
 pub mod urlx;
 pub mod verify;
 

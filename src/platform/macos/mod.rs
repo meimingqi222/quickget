@@ -36,3 +36,24 @@ pub fn open_in_default_app(path: &Path) {
 pub fn open_folder(path: &Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
+
+pub fn is_packaged_install() -> bool {
+    match std::env::current_exe() {
+        Ok(exe) => !crate::core::updater::looks_like_dev_build(&exe),
+        Err(_) => false,
+    }
+}
+
+pub fn update_cache_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("QuickGet").join("update-cache"))
+}
+
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+pub fn cleanup_previous_update_leftovers() {}
+
+pub fn apply_update_and_restart(_payload: &Path) -> Result<(), String> {
+    Err("macOS 自动更新将在后续版本支持".into())
+}

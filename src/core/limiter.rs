@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 /// 导致实际吞吐只有目标的一半左右。取 4MiB，保证 40 万 MB/s 以内每次 grant 都能
 /// 给足 100ms 的额度（limit/10），不被二次压小。
 const MAX_GRANT: u64 = 4 * 1024 * 1024;
+/// 把限速等待切成小片；这里只保证额度等待的轮询间隔，网络读取仍受请求超时限制。
+const MAX_SLEEP_SLICE: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct DownloadLimiter {
@@ -68,7 +70,10 @@ impl DownloadLimiter {
                     let granted = bucket.available.floor() as u64;
                     bucket.available -= granted as f64;
                     let needed = (wanted as f64 - granted as f64).max(0.0);
-                    (granted as usize, Some(Duration::from_secs_f64(needed / limit as f64)))
+                    (
+                        granted as usize,
+                        Some(Duration::from_secs_f64(needed / limit as f64)),
+                    )
                 }
             };
             if granted > 0 {
@@ -80,7 +85,7 @@ impl DownloadLimiter {
                     if d < Duration::from_micros(200) {
                         std::thread::yield_now();
                     } else {
-                        std::thread::sleep(d);
+                        std::thread::sleep(d.min(MAX_SLEEP_SLICE));
                     }
                 }
                 None => return wanted as usize,
@@ -99,7 +104,10 @@ mod tests {
         let limiter = DownloadLimiter::new(0);
         // 不限速时应返回调用方要的量（不超过 MAX_GRANT）。
         assert_eq!(limiter.acquire(100_000, &Control::new()), 100_000);
-        assert_eq!(limiter.acquire(MAX_GRANT as usize + 1, &Control::new()), MAX_GRANT as usize);
+        assert_eq!(
+            limiter.acquire(MAX_GRANT as usize + 1, &Control::new()),
+            MAX_GRANT as usize
+        );
     }
 
     #[test]
@@ -107,5 +115,16 @@ mod tests {
         let limiter = DownloadLimiter::new(0);
         limiter.set_limit(1024);
         assert_eq!(limiter.limit_bps.load(Ordering::Relaxed), 1024);
+    }
+
+    #[test]
+    fn interrupted_acquire_returns_promptly() {
+        let limiter = DownloadLimiter::new(1);
+        let ctrl = Control::new();
+        let stop = ctrl.stop.clone();
+        let worker = std::thread::spawn(move || limiter.acquire(1024, &ctrl));
+        std::thread::sleep(Duration::from_millis(20));
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(worker.join().unwrap(), 0);
     }
 }

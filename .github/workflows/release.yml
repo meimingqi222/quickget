@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]+.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-windows:
+    name: Build & Release (Windows x86_64)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # gpui 0.2.2 在 release 模式下用 fxc.exe 编译 HLSL 着色器。
+      # 主动搜索本机最新的 fxc.exe 并通过 GPUI_FXC_PATH 传给 gpui。
+      - name: Locate fxc.exe for gpui shader compilation
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter "fxc.exe" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -eq "x64" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) {
+            throw "未找到 fxc.exe，请确认 windows-latest 镜像已安装 Windows SDK"
+          }
+          Write-Host "找到 fxc.exe: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Package Windows distribution
+        shell: pwsh
+        run: |
+          $distDir = "dist/quickget-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          Copy-Item "target/release/quickget.exe" "$distDir/"
+
+          if (Test-Path "README.md") { Copy-Item "README.md" "$distDir/" }
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$distDir/" }
+
+          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/quickget-windows-x86_64.zip" -Force
+
+          $hash = (Get-FileHash -Path "dist/quickget-windows-x86_64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  quickget-windows-x86_64.zip" | Out-File -Encoding utf8 "dist/quickget-windows-x86_64.zip.sha256"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            dist/quickget-windows-x86_64.zip
+            dist/quickget-windows-x86_64.zip.sha256
+          retention-days: 7
+
+  build-macos:
+    name: Build & Release (macOS Universal, aarch64, x86_64)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          lipo -create \
+            -output target/universal/release/quickget \
+            target/aarch64-apple-darwin/release/quickget \
+            target/x86_64-apple-darwin/release/quickget
+
+      - name: Package macOS distributions
+        run: |
+          chmod +x scripts/package-macos.sh
+          mkdir -p dist
+
+          # 1. Apple Silicon (aarch64) 版本
+          ./scripts/package-macos.sh dist/aarch64 target/aarch64-apple-darwin/release/quickget
+          (cd dist/aarch64 && zip -r -y ../quickget-macos-aarch64.zip QuickGet.app)
+          shasum -a 256 dist/quickget-macos-aarch64.zip | awk '{print $1"  quickget-macos-aarch64.zip"}' > dist/quickget-macos-aarch64.zip.sha256
+
+          # 2. Intel (x86_64) 版本
+          ./scripts/package-macos.sh dist/x86_64 target/x86_64-apple-darwin/release/quickget
+          (cd dist/x86_64 && zip -r -y ../quickget-macos-x86_64.zip QuickGet.app)
+          shasum -a 256 dist/quickget-macos-x86_64.zip | awk '{print $1"  quickget-macos-x86_64.zip"}' > dist/quickget-macos-x86_64.zip.sha256
+
+          # 3. Universal 通用二进制版本
+          ./scripts/package-macos.sh dist/universal target/universal/release/quickget
+          (cd dist/universal && zip -r -y ../quickget-macos-universal.zip QuickGet.app)
+          shasum -a 256 dist/quickget-macos-universal.zip | awk '{print $1"  quickget-macos-universal.zip"}' > dist/quickget-macos-universal.zip.sha256
+
+          rm -rf dist/aarch64 dist/x86_64 dist/universal
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: |
+            dist/quickget-macos-*.zip
+            dist/quickget-macos-*.zip.sha256
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact directories
+        run: |
+          find dist -name "*.zip" -exec mv {} dist/ \;
+          find dist -name "*.sha256" -exec mv {} dist/ \;
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/quickget-windows-x86_64.zip
+            dist/quickget-windows-x86_64.zip.sha256
+            dist/quickget-macos-universal.zip
+            dist/quickget-macos-universal.zip.sha256
+            dist/quickget-macos-aarch64.zip
+            dist/quickget-macos-aarch64.zip.sha256
+            dist/quickget-macos-x86_64.zip
+            dist/quickget-macos-x86_64.zip.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false

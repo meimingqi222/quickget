@@ -4,6 +4,7 @@ use crate::core::model::{BtPeers, TaskFile};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct Control {
@@ -35,6 +36,37 @@ impl Control {
 impl Default for Control {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Wait for at most `duration`, returning early when pause or cancellation is requested.
+/// Blocking network reads still rely on their request timeout; this helper covers backoff
+/// and other deliberate sleeps without adding another synchronization primitive to Control.
+pub fn wait_interruptible(ctrl: &Control, duration: Duration) -> bool {
+    const SLICE: Duration = Duration::from_millis(25);
+    let deadline = Instant::now() + duration;
+    while !ctrl.interrupted() {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep((deadline - now).min(SLICE));
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interruptible_wait_honors_stop() {
+        let ctrl = Control::new();
+        let stop = ctrl.stop.clone();
+        let waiting = std::thread::spawn(move || wait_interruptible(&ctrl, Duration::from_secs(2)));
+        std::thread::sleep(Duration::from_millis(10));
+        stop.store(true, Ordering::Relaxed);
+        assert!(waiting.join().unwrap());
     }
 }
 
