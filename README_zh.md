@@ -34,6 +34,12 @@ Downie 侧重网页视频抓取。迅雷侧重把带宽打满。QuickGet 面向�
 
 ## 编译
 
+共享的 `gpui-app-kit` 是私有 Git 依赖。请使用有读取权限的账号（例如先执行
+`gh auth setup-git`），构建前设置 `CARGO_NET_GIT_FETCH_WITH_CLI=true`。
+两个 kit crate 与根 manifest 的 GPUI patch 必须固定到同一完整提交。
+GitHub Actions 需要配置 `GPUI_APP_KIT_TOKEN`，使用仅能读取 kit 仓库的专用 token；
+默认 `GITHUB_TOKEN` 无法读取另一个私有仓库。
+
 ```bash
 cargo test
 cargo run

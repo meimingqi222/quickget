@@ -34,6 +34,12 @@ The extension ID is pinned to `agkijomhcpkgagodkkjknfnocfnalmcc`. Hijacking Chro
 
 ## Build
 
+The shared `gpui-app-kit` is a private Git dependency. Use an account with read access
+(for example, `gh auth setup-git`) and set `CARGO_NET_GIT_FETCH_WITH_CLI=true` before
+building. Keep both kit crates and the root GPUI patch pinned to the same full commit.
+GitHub Actions requires `GPUI_APP_KIT_TOKEN`, a dedicated read-only token with access
+to the kit repository; the default `GITHUB_TOKEN` cannot read another private repository.
+
 ```bash
 cargo test
 cargo run

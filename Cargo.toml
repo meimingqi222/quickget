@@ -10,7 +10,9 @@ license = "MIT"
 axum = "0.8"
 # `default-features = false` 关掉 Linux 的 wayland/x11 和 Windows 的 manifest，
 # 但必须保留 `font-kit`——否则 macOS 上会用 NoopTextSystem，文字全部不可见。
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+gpui-app-host = { git = "https://github.com/meimingqi222/gpui-app-kit.git", rev = "ebb73e0e98701f405ef0bb85e95008a052013031" }
+gpui-app-widgets = { git = "https://github.com/meimingqi222/gpui-app-kit.git", rev = "ebb73e0e98701f405ef0bb85e95008a052013031" }
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +27,8 @@ rfd = "0.15"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+gpui-app-update-core = { git = "https://github.com/meimingqi222/gpui-app-kit.git", rev = "ebb73e0e98701f405ef0bb85e95008a052013031" }
+gpui-app-update-installer = { git = "https://github.com/meimingqi222/gpui-app-kit.git", rev = "ebb73e0e98701f405ef0bb85e95008a052013031" }
 
 [features]
 # 启用百度网盘 sharedownload 逆向解析（DES-ECB 解密加密 list）。
@@ -71,3 +75,6 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+gpui = { git = "https://github.com/meimingqi222/gpui-app-kit.git", rev = "ebb73e0e98701f405ef0bb85e95008a052013031" }

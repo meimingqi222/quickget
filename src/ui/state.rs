@@ -2,89 +2,10 @@
 
 use crate::core::model::Task;
 use crate::core::progress::{Control, LiveMeta, LiveProgress};
-use gpui::{Bounds, FocusHandle, Pixels, ShapedLine, Task as GpuiTask};
+use gpui::Task as GpuiTask;
+pub use gpui_app_widgets::input::TextInputState;
 use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::Arc;
-
-pub struct SearchTextHit {
-    pub bounds: Bounds<Pixels>,
-    pub line: ShapedLine,
-}
-
-pub struct TextInputState {
-    pub text: String,
-    pub sel: Range<usize>,
-    pub marked: Option<Range<usize>>,
-    pub bounds: Option<Bounds<Pixels>>,
-    pub text_hit: Option<SearchTextHit>,
-    pub text_drag: Option<usize>,
-    pub focus_handle: FocusHandle,
-}
-
-impl TextInputState {
-    pub fn new(focus_handle: FocusHandle) -> Self {
-        Self {
-            text: String::new(),
-            sel: 0..0,
-            marked: None,
-            bounds: None,
-            text_hit: None,
-            text_drag: None,
-            focus_handle,
-        }
-    }
-
-    pub fn selection(&self) -> Range<usize> {
-        crate::ui::text_input::clamp_to_boundary(&self.text, self.sel.clone())
-    }
-
-    pub fn reset_caret(&mut self) {
-        let end = self.text.len();
-        self.sel = end..end;
-        self.marked = None;
-    }
-
-    pub fn clear(&mut self) {
-        self.text.clear();
-        self.reset_caret();
-    }
-
-    pub fn replace(&mut self, range_utf16: Option<&Range<usize>>, new_text: &str) {
-        let (sel, marked) = crate::ui::text_input::replace_text(
-            &mut self.text,
-            &self.sel,
-            &self.marked,
-            range_utf16,
-            new_text,
-        );
-        self.sel = sel;
-        self.marked = marked;
-    }
-
-    pub fn replace_and_mark(
-        &mut self,
-        range_utf16: Option<&Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<&Range<usize>>,
-    ) {
-        let (sel, marked) = crate::ui::text_input::replace_and_mark_text(
-            &mut self.text,
-            &self.sel,
-            &self.marked,
-            range_utf16,
-            new_text,
-            new_selected_range_utf16,
-        );
-        self.sel = sel;
-        self.marked = marked;
-    }
-
-    pub fn set_text(&mut self, text: String) {
-        self.text = text;
-        self.reset_caret();
-    }
-}
 
 pub struct RuntimeSlot {
     pub ctrl: Control,

@@ -27,9 +27,10 @@ use crate::ui::i18n::*;
 use crate::ui::theme::*;
 use crate::ui::views::{render_settings_view, render_tasks_view};
 use gpui::{
-    div, prelude::*, px, rgb, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, Render,
+    div, prelude::*, px, rgb, ClipboardItem, Context, FocusHandle, IntoElement, Render,
     ScrollHandle, Task as GpuiTask, Window,
 };
+use gpui_app_widgets::overlay::{ModalBackdrop, OverlayPolicy};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 短时间进来这么多项就先确认再下，避免页面接管/粘贴列表把队列灌满。
@@ -215,7 +216,7 @@ impl Root {
     pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
-                self.url_input.set_text(text);
+                self.url_input.set_text(&text);
                 self.clip_hint = None;
                 cx.notify();
             }
@@ -1736,40 +1737,26 @@ fn render_confirm_overlay(root: &Root, cx: &mut Context<Root>) -> impl IntoEleme
             0,
         ),
     };
-    let fh = root.confirm_focus.clone();
     let ok_bg = if danger { ERROR } else { PRIMARY };
+    // 浏览器捕获的批量确认只能显式取消，点遮罩不关闭；Esc 始终取消。
+    let outside = !matches!(
+        root.pending_confirm,
+        Some(PendingConfirm::AddCaptures { .. })
+    );
+    let (dismiss, confirm) = (cx.entity(), cx.entity());
 
-    div()
-        .id("confirm-mask")
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgba(TEXT, 0.32))
-        .occlude()
-        .track_focus(&fh)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                if matches!(
-                    this.pending_confirm,
-                    Some(PendingConfirm::AddCaptures { .. })
-                ) {
-                    return;
-                }
-                this.dismiss_confirm(cx);
-            }),
-        )
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-            match event.keystroke.key.as_str() {
-                "escape" => this.dismiss_confirm(cx),
-                "enter" | "return" => this.confirm_pending(cx),
-                _ => {}
+    ModalBackdrop::new("confirm-mask")
+        .background(rgba(TEXT, 0.32))
+        .policy(OverlayPolicy::DISMISSABLE_MODAL.close_on_outside(outside))
+        .focus_handle(&root.confirm_focus)
+        .on_dismiss(move |_, cx| dismiss.update(cx, |this, cx| this.dismiss_confirm(cx)))
+        .on_key(move |event, _, cx| {
+            let enter = matches!(event.keystroke.key.as_str(), "enter" | "return");
+            if enter {
+                confirm.update(cx, |this, cx| this.confirm_pending(cx));
             }
-        }))
+            enter
+        })
         .child(
             div()
                 .id("confirm-dialog")
@@ -1783,7 +1770,7 @@ fn render_confirm_overlay(root: &Root, cx: &mut Context<Root>) -> impl IntoEleme
                 .flex()
                 .flex_col()
                 .gap_3()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .text_sm()

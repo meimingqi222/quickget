@@ -4,10 +4,9 @@
 //! 不发起定时网络请求。
 
 use crate::core::updater::{
-    candidate_asset_names, current_target, download_to_file, evaluate_release,
-    extract_update_zip, fetch_latest_release, fetch_text, is_skipped, parse_checksum_sidecar,
-    sha256_file, DownloadProgress, UpdateOperation, UpdateStatus, CHECK_INTERVAL_MS,
-    FIRST_CHECK_DELAY_MS,
+    candidate_asset_names, current_target, download_to_file, evaluate_release, extract_update_zip,
+    fetch_latest_release, fetch_text, is_skipped, verify_checksum, DownloadProgress,
+    UpdateOperation, UpdateStatus, CHECK_INTERVAL_MS, FIRST_CHECK_DELAY_MS,
 };
 use crate::ui::i18n::*;
 use crate::ui::Root;
@@ -287,18 +286,9 @@ impl Root {
             }
             let sidecar = fetch_text(&checksum_url, 20_000)?;
             let _ = std::fs::write(&sidecar_path, &sidecar);
-            let expected = parse_checksum_sidecar(&sidecar)
-                .ok_or_else(|| "校验文件格式异常".to_string())?;
-            let actual = sha256_file(&zip_path).map_err(|e| format!("计算 SHA-256 失败: {e}"))?;
-            if actual != expected {
-                let _ = std::fs::remove_file(&zip_path);
-                return Err(format!(
-                    "SHA-256 校验不匹配（期望 {expected}，实际 {actual}）"
-                ));
-            }
+            verify_checksum(&zip_path, &sidecar)?;
 
-            let extract_dir = cache.join("extracted");
-            let payload = extract_update_zip(&zip_path, &extract_dir)?;
+            let payload = extract_update_zip(&zip_path, &cache)?;
             Ok::<PathBuf, String>(payload)
         });
 

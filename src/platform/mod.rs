@@ -16,6 +16,16 @@ pub mod windows;
 
 #[cfg(target_os = "macos")]
 pub use macos::*;
+
+/// 共享安装器错误的产品文案。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn install_error_message(e: gpui_app_update_installer::InstallError) -> String {
+    use gpui_app_update_installer::InstallError;
+    match e {
+        InstallError::WriteHelper(e) => format!("写入更新脚本失败: {e}"),
+        InstallError::SpawnHelper(e) => format!("启动更新辅助进程失败: {e}"),
+    }
+}
 #[cfg(windows)]
 pub use windows::*;
 

@@ -2,7 +2,8 @@
 
 #![windows_subsystem = "windows"]
 
-use gpui::{actions, px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
+use gpui_app_host::desktop;
 use quickget::core::engine::run_task;
 use quickget::core::limiter::DownloadLimiter;
 use quickget::core::model::Task;
@@ -13,8 +14,6 @@ use quickget::ui::Root;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-
-actions!(quickget, [Quit]);
 
 fn main() {
     #[cfg(windows)]
@@ -55,25 +54,20 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         #[cfg(target_os = "macos")]
-        quickget::platform::macos::set_dock_icon();
+        quickget::platform::macos::set_dock_icon(cx);
 
-        #[cfg(target_os = "macos")]
-        {
-            cx.set_menus(vec![gpui::Menu {
-                name: "QuickGet".into(),
-                items: vec![gpui::MenuItem::action("Quit QuickGet", Quit)],
-            }]);
-            cx.bind_keys([
-                gpui::KeyBinding::new("cmd-q", Quit, None),
-                gpui::KeyBinding::new("cmd-w", Quit, None),
-            ]);
-        }
-        #[cfg(not(target_os = "macos"))]
-        cx.bind_keys([
-            gpui::KeyBinding::new("ctrl-q", Quit, None),
-            gpui::KeyBinding::new("alt-f4", Quit, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        desktop::bind_actions(
+            cx,
+            desktop::DesktopLabels {
+                app: "QuickGet",
+                hide: "Hide QuickGet",
+                hide_others: "Hide Others",
+                quit: "Quit QuickGet",
+                window: "Window",
+                close: "Close",
+            },
+            |cx| desktop::main_window_closed(cx, false),
+        );
 
         let bounds = Bounds::centered(None, size(px(1040.), px(680.)), cx);
         cx.open_window(
@@ -82,9 +76,8 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                window.on_window_should_close(cx, |_, cx| {
-                    cx.quit();
-                    true
+                desktop::install_close_handler(window, cx, |cx| {
+                    desktop::main_window_closed(cx, false);
                 });
                 cx.new(|cx| Root::new(cx))
             },
