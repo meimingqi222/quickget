@@ -97,9 +97,11 @@ pub fn render_update_dialog(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
         .flex()
         .items_center()
         .justify_center()
+        .p_4()
         .child(
             div()
                 .w(px(460.))
+                .max_w_full()
                 .p_6()
                 .rounded_2xl()
                 .bg(rgb(CARD))
@@ -205,12 +207,13 @@ pub fn render_update_dialog(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_between()
+                        .flex_col()
+                        .gap_3()
                         .pt_2()
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .gap_2()
                                 .when(show_skip, |d| {
@@ -233,7 +236,9 @@ pub fn render_update_dialog(root: &Root, cx: &mut Context<Root>) -> impl IntoEle
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
+                                .justify_end()
                                 .gap_2()
                                 .child(
                                     ghost_button(tr_update_later(lang).into(), true)
